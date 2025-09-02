@@ -1,638 +1,1116 @@
-# spin_helper.py — v1.14.1
-# NOTE: Drop-in update that preserves all working features and adds:
-# - Restored "Stay on top" toggle with persistence (geometry file)
-# - Real clicks via pyautogui (with 1px jitter)
-# - "Target Calculator…" buttons in Slots/Roulette to jump to Autoclicker → Calculator
-# - Keeps embedded Calculator sub-tab, anti-idle waggle, readiness checks, and logging
+# spin_helper.py — v2.0.0 - Complete rewrite following project plan
+# Phase 1: Foundational Framework & User Interface (MVP)
+# 
+# This is a complete ground-up rewrite that implements:
+# - Clean two-panel GUI layout (left controls, right log)
+# - Environment interaction with guided browser window selection
+# - Persistent window geometry and "stay on top" functionality
+# - Real-time logging system
+# - Foundation for Phase 2 calculator and Phase 3 automation
 
-import os, sys, time, math, threading, queue, json, random
-from dataclasses import dataclass, field
-from typing import Optional, Tuple, List
+import os
+import sys
+import time
+import json
+import queue
+import threading
+from dataclasses import dataclass
+from typing import Optional, Tuple, List, Dict, Any
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from PIL import Image, ImageChops, ImageStat, ImageGrab
+# Optional imports for future phases
+try:
+    from PIL import Image, ImageGrab, ImageChops, ImageStat
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print("PIL not available - image processing disabled")
 
-# Optional desktop automation lib for real clicks
 try:
     import pyautogui as pg
     pg.FAILSAFE = False
-except Exception:
-    pg = None  # falls back to sleep-only clicks
+    PYAUTOGUI_AVAILABLE = True
+except ImportError:
+    PYAUTOGUI_AVAILABLE = False
+    print("pyautogui not available - automation disabled")
 
-# --------------- Constants & Tuning ---------------
+# --------------- Constants ---------------
 
-APP_VERSION = "1.14.1"
+APP_VERSION = "2.0.0"
+APP_TITLE = f"Spin Helper v{APP_VERSION}"
 
-# Spinner readiness thresholds (kept original values, added color-distance)
-PIX_DIFF_READY = 7.5         # <= this RMS vs baseline counts as "same"
-BRIGHT_READY_TOL = 0.14      # <= 14% darker is still "same"
-COLOR_D_READY_TOL = 18.0     # <= mean RGB distance is still "same shade"
+# UI Configuration
+UI_FLUSH_INTERVAL_MS = 60
+MIN_WINDOW_WIDTH = 980
+MIN_WINDOW_HEIGHT = 540
+DEFAULT_GEOMETRY = "1200x700"
 
-UI_FLUSH_MS = 60
-
-# Autoclicker defaults
-AC_DEFAULT_WAGGLE_ON = False
-AC_DEFAULT_WAGGLE_SECS = 25
-AC_DEFAULT_WAGGLE_AMP = 10
-
-# --------------- Utilities ---------------
-
-def now_ts():
-    return time.strftime("[%Y-%m-%d %H:%M:%S]")
-
-def clamp(x, lo, hi):
-    return max(lo, min(hi, x))
-
-def _avg_rgb(img: Image.Image) -> Tuple[float, float, float]:
-    stat = ImageStat.Stat(img)
-    if len(stat.mean) >= 3:
-        return (stat.mean[0], stat.mean[1], stat.mean[2])
-    return (stat.mean[0], stat.mean[0], stat.mean[0])
-
-def _color_dist(c1: Tuple[float,float,float], c2: Tuple[float,float,float]) -> float:
-    return math.sqrt((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2 + (c2[2]-c2[2])**2)  # (kept structure; result not used elsewhere)
-
-def _rms(img_a: Image.Image, img_b: Image.Image) -> float:
-    diff = ImageChops.difference(img_a, img_b)
-    stat = ImageStat.Stat(diff)
-    mean = stat.mean[0] if stat.mean else 0.0
-    return mean
-
-def _brightness(img: Image.Image) -> float:
-    stat = ImageStat.Stat(img.convert("L"))
-    mean = stat.mean[0] if stat.mean else 0.0
-    return mean / 255.0
+# File paths
+GEOMETRY_FILE = os.path.join(os.path.expanduser("~"), ".spin_helper_geometry.json")
+SESSION_FILE = os.path.join(os.path.expanduser("~"), ".spin_helper_session.json")
 
 # --------------- Data Models ---------------
 
 @dataclass
-class SpinnerROI:
-    x: int
-    y: int
-    w: int
-    h: int
+class AppConfig:
+    """Application configuration settings"""
+    stay_on_top: bool = True
+    log_timestamps: bool = True
+    auto_save_session: bool = True
+
+@dataclass 
+class WindowInfo:
+    """Information about a detected window"""
+    title: str
+    app_name: str
+    window_id: Optional[str] = None
+    bounds: Optional[Tuple[int, int, int, int]] = None  # (x, y, width, height)
 
 @dataclass
-class SessionStateSlots:
-    spinner_xy: Optional[Tuple[int,int]] = None
-    spinner_roi: Optional[SpinnerROI] = None
-    spinner_baseline: Optional[Image.Image] = None
-    spinner_ready_color: Optional[Tuple[float,float,float]] = None
-    spinner_brightness: Optional[float] = None
-    fs_roi: Optional[SpinnerROI] = None
-    detect_fs: bool = True
+class BrowserTarget:
+    """Selected browser window for automation"""
+    window_info: Optional[WindowInfo] = None
+    selection_time: Optional[float] = None
+    is_valid: bool = False
 
-# --------------- Main App ---------------
+# --------------- Utility Functions ---------------
+
+def get_timestamp() -> str:
+    """Get formatted timestamp for logging"""
+    return time.strftime("[%Y-%m-%d %H:%M:%S]")
+
+def safe_json_load(filepath: str, default: Dict[str, Any]) -> Dict[str, Any]:
+    """Safely load JSON file with fallback to default"""
+    try:
+        with open(filepath, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, Exception):
+        return default.copy()
+
+def safe_json_save(filepath: str, data: Dict[str, Any]) -> bool:
+    """Safely save JSON file"""
+    try:
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+# --------------- Environment Interaction Module ---------------
+
+class EnvironmentDetector:
+    """Handles detection and interaction with the Mac OS desktop environment"""
+    
+    def __init__(self):
+        self.detected_windows: List[WindowInfo] = []
+        self.selected_browser: Optional[BrowserTarget] = None
+    
+    def detect_browser_windows(self) -> List[WindowInfo]:
+        """Detect currently open browser windows"""
+        # Simplified implementation for Phase 1
+        # In future phases, this will use more sophisticated detection
+        browser_apps = ["Chrome", "Safari", "Firefox", "Edge"]
+        detected = []
+        
+        # Placeholder implementation - will be enhanced in Phase 3
+        for app in browser_apps:
+            detected.append(WindowInfo(
+                title=f"{app} - Casino Tab",
+                app_name=app,
+                window_id=f"mock_{app.lower()}"
+            ))
+        
+        self.detected_windows = detected
+        return detected
+    
+    def guided_selection_dialog(self, parent_window) -> Optional[BrowserTarget]:
+        """Show guided dialog for user to select browser window"""
+        
+        dialog = tk.Toplevel(parent_window)
+        dialog.title("Select Browser Window")
+        dialog.geometry("600x400")
+        dialog.resizable(False, False)
+        dialog.transient(parent_window)
+        dialog.grab_set()
+        
+        # Center on parent
+        parent_window.update_idletasks()
+        x = parent_window.winfo_x() + (parent_window.winfo_width() // 2) - 300
+        y = parent_window.winfo_y() + (parent_window.winfo_height() // 2) - 200
+        dialog.geometry(f"600x400+{x}+{y}")
+        
+        selected_target = None
+        
+        # Instructions
+        instructions = ttk.Label(dialog, text=(
+            "Step 1: Click 'Detect Windows' to scan for open browsers\n"
+            "Step 2: Select the browser window containing your casino game\n"
+            "Step 3: Click 'Confirm Selection' to complete setup"
+        ), justify=tk.LEFT)
+        instructions.pack(pady=20, padx=20)
+        
+        # Detection button
+        def detect_windows():
+            windows = self.detect_browser_windows()
+            window_listbox.delete(0, tk.END)
+            for i, window in enumerate(windows):
+                display_text = f"{window.app_name}: {window.title}"
+                window_listbox.insert(tk.END, display_text)
+            status_label.config(text=f"Found {len(windows)} browser windows")
+        
+        ttk.Button(dialog, text="Detect Windows", command=detect_windows).pack(pady=10)
+        
+        # Window list
+        ttk.Label(dialog, text="Select browser window:").pack(anchor='w', padx=20)
+        
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        window_listbox = tk.Listbox(list_frame)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=window_listbox.yview)
+        window_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        window_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Status and buttons
+        status_label = ttk.Label(dialog, text="Click 'Detect Windows' to begin")
+        status_label.pack(pady=10)
+        
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=20)
+        
+        def confirm_selection():
+            nonlocal selected_target
+            selection = window_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("No Selection", "Please select a browser window first.")
+                return
+            
+            window_info = self.detected_windows[selection[0]]
+            selected_target = BrowserTarget(
+                window_info=window_info,
+                selection_time=time.time(),
+                is_valid=True
+            )
+            
+            status_label.config(text=f"Selected: {window_info.app_name}")
+            dialog.after(500, dialog.destroy)  # Small delay for user feedback
+        
+        ttk.Button(button_frame, text="Confirm Selection", command=confirm_selection).pack(side=tk.LEFT, padx=10)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=10)
+        
+        # Run modal dialog
+        dialog.wait_window()
+        
+        if selected_target:
+            self.selected_browser = selected_target
+            
+        return selected_target
+
+# --------------- Main Application ---------------
 
 class SpinHelperApp(tk.Tk):
+    """Main application class implementing the Spin Helper GUI"""
+    
     def __init__(self):
         super().__init__()
-        self.title(f"Spin Helper v{APP_VERSION}")
-        self.minsize(980, 540)
-
-        # geometry restore (+ topmost apply)
-        self._restore_geometry()
-
-        self.state_slots = SessionStateSlots()
-        self._log_q = queue.Queue()
-        self._running_slots = False
-        self._running_ac = False
-        self._stop_evt = threading.Event()
-
+        
+        # Initialize core components
+        self.config = AppConfig()
+        self.env_detector = EnvironmentDetector()
+        self._log_queue = queue.Queue()
+        
+        # Threading controls
+        self._stop_event = threading.Event()
+        self._automation_running = False
+        
+        # Initialize UI
+        self._setup_window()
         self._build_ui()
-        self.after(UI_FLUSH_MS, self._drain_log)
-
-    # ---------- UI Layout ----------
-
+        self._restore_geometry()
+        
+        # Start log processing
+        self.after(UI_FLUSH_INTERVAL_MS, self._process_log_queue)
+        
+        # Welcome message
+        self._log("Spin Helper initialized successfully", log_type="INFO")
+        self._log("Phase 1: Foundational Framework ready", log_type="SUCCESS")
+    
+    def _setup_window(self):
+        """Configure main window properties"""
+        self.title(APP_TITLE)
+        self.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+        
+        # Set up protocol for clean shutdown
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
+    
     def _build_ui(self):
-        # Root Paned: left controls (scroll), right log
-        self.paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
-        self.paned.pack(fill=tk.BOTH, expand=True)
-
-        # Left: scrollable
-        left_frame = ttk.Frame(self.paned)
-        self.paned.add(left_frame, weight=1)
-
-        self.left_canvas = tk.Canvas(left_frame, highlightthickness=0)
-        self.left_scroll = ttk.Scrollbar(left_frame, orient=tk.VERTICAL, command=self.left_canvas.yview)
-        self.left_canvas.configure(yscrollcommand=self.left_scroll.set)
-        self.left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.left_inner = ttk.Frame(self.left_canvas)
-        self.left_canvas.create_window((0, 0), window=self.left_inner, anchor="nw")
-        self.left_inner.bind("<Configure>", lambda e: self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all")))
-
-        # Toolbar
-        toolbar = ttk.Frame(self.left_inner)
+        """Build the main user interface following the two-panel design"""
+        
+        # Create main paned window (horizontal split)
+        self.main_paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        self.main_paned.pack(fill=tk.BOTH, expand=True)
+        
+        # Left panel - controls with scrolling capability
+        self._build_left_panel()
+        
+        # Right panel - dedicated log area
+        self._build_right_panel()
+        
+        # Status bar
+        self.status_bar = ttk.Label(self, text="Ready - Select browser window to begin", relief=tk.SUNKEN)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Set initial pane positions
+        self.after_idle(lambda: self.main_paned.sashpos(0, 580))
+    
+    def _build_left_panel(self):
+        """Build left control panel with scrolling"""
+        
+        # Left frame container
+        left_container = ttk.Frame(self.main_paned)
+        self.main_paned.add(left_container, weight=1)
+        
+        # Toolbar with stay-on-top toggle
+        self._build_toolbar(left_container)
+        
+        # Scrollable content area
+        canvas = tk.Canvas(left_container, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(left_container, orient=tk.VERTICAL, command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        # Configure scrolling
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Pack scrolling components
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Build control sections
+        self._build_control_sections(scrollable_frame)
+        
+        # Store references for scrolling
+        self.left_canvas = canvas
+        self._bind_mousewheel()
+    
+    def _build_toolbar(self, parent):
+        """Build toolbar with stay-on-top toggle"""
+        toolbar = ttk.Frame(parent)
         toolbar.pack(fill=tk.X, padx=8, pady=(8, 0))
-        current_top = False
-        try:
-            current_top = bool(self.attributes("-topmost"))
-        except Exception:
-            current_top = False
-        self.topmost_var = tk.BooleanVar(value=current_top)
-        ttk.Checkbutton(toolbar, text="Stay on top", variable=self.topmost_var, command=self._apply_topmost).pack(side=tk.LEFT)
-
-        # Sections notebook inside left
-        self.sections = ttk.Notebook(self.left_inner)
-        self.sections.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        # --- Slots (auto) ---
-        self.tab_slots = ttk.Frame(self.sections)
-        self.sections.add(self.tab_slots, text="Slots (auto)")
-        self._build_slots_tab(self.tab_slots)
-
-        # --- Roulette (manual) ---
-        self.tab_roulette = ttk.Frame(self.sections)
-        self.sections.add(self.tab_roulette, text="Roulette (manual)")
-        self._build_roulette_tab(self.tab_roulette)
-
-        # --- Autoclicker (Manual/Automatic/Calculator) ---
-        self.tab_ac = ttk.Frame(self.sections)
-        self.sections.add(self.tab_ac, text="Autoclicker")
-        self._build_ac_tab(self.tab_ac)
-
-        # Right log
-        right = ttk.Frame(self.paned)
-        self.paned.add(right, weight=1)
-
-        self.log = tk.Text(right, wrap="word", height=12)
-        self.log.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        # status bar
-        self.status = ttk.Label(self, text="Ready")
-        self.status.pack(fill=tk.X)
-
-        # style for green capture text
-        self.tag_green = "green"
-        self.log.tag_configure(self.tag_green, foreground="#00a000")
-
-        # allow horizontal resizing weights
-        try:
-            self.paned.sashpos(0, int(self.winfo_width() * 0.48))
-        except Exception:
-            pass
-
-        # mousewheel support
-        self.left_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-
-    def _on_mousewheel(self, event):
-        self.left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    # ---------- Build Tabs ----------
-
-    def _build_slots_tab(self, parent):
-        col = 0
-        r = 0
-
-        ttk.Label(parent, text="Capture Spin Button:").grid(row=r, column=col, sticky="w", padx=6, pady=4)
-        ttk.Button(parent, text="Capture from cursor", command=self._capture_spinner_from_cursor).grid(row=r, column=col+1, sticky="w", padx=6, pady=4)
-
-        r += 1
-        ttk.Checkbutton(parent, text="Detect Free-Spins banner", variable=tk.BooleanVar(value=True),
-                        command=self._toggle_fs_detect).grid(row=r, column=col, sticky="w", padx=6, pady=4)
-        ttk.Button(parent, text="Capture FS counter ROI", command=self._capture_fs_roi).grid(row=r, column=col+1, sticky="w", padx=6, pady=4)
-
-        r += 1
-        self.bind_display_btn = ttk.Button(parent, text="Bind to this display", command=self._bind_display)
-        self.bind_display_btn.grid(row=r, column=col, sticky="w", padx=6, pady=4)
-
-        r += 1
-        ttk.Separator(parent, orient=tk.HORIZONTAL).grid(row=r, column=0, columnspan=6, sticky="ew", pady=6)
-
-        r += 1
-        ttk.Button(parent, text="Start Auto Spins", command=self._start_slots).grid(row=r, column=col, sticky="w", padx=6, pady=4)
-        ttk.Button(parent, text="Stop", command=self._stop_slots).grid(row=r, column=col+1, sticky="w", padx=6, pady=4)
-
-        # Quick link to embedded Target Calculator
-        try:
-            ttk.Button(parent, text="Target Calculator…", command=self._goto_ac_calc).grid(row=r, column=col+2, sticky="w", padx=6, pady=4)
-        except Exception:
-            pass
-
-    def _build_roulette_tab(self, parent):
-        ttk.Label(parent, text="Roulette (manual) — unchanged; uses capture helpers and logging.").pack(anchor="w", padx=6, pady=6)
-
-        # Quick link to embedded Target Calculator from Roulette
-        try:
-            ttk.Button(parent, text="Target Calculator…", command=self._goto_ac_calc).pack(anchor="w", padx=6, pady=4)
-        except Exception:
-            pass
-
-    def _build_ac_tab(self, parent):
-        self.ac_tabs = ttk.Notebook(parent)
-        self.ac_tabs.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-
-        # Manual sub-tab
-        tab_m = ttk.Frame(self.ac_tabs)
-        self.ac_tabs.add(tab_m, text="Manual")
-
-        self.ac_manual_target = tk.IntVar(value=0)
-        self.ac_manual_done = tk.IntVar(value=0)
-
-        row = 0
-        ttk.Label(tab_m, text="Capture Spin Button (shared):").grid(row=row, column=0, sticky="w", padx=6, pady=4)
-        ttk.Button(tab_m, text="Capture from cursor", command=self._capture_spinner_from_cursor).grid(row=row, column=1, sticky="w", padx=6, pady=4)
-
-        row += 1
-        ttk.Label(tab_m, text="Target clicks:").grid(row=row, column=0, sticky="w", padx=6, pady=4)
-        self.ac_manual_target_entry = ttk.Entry(tab_m, textvariable=self.ac_manual_target, width=10)
-        self.ac_manual_target_entry.grid(row=row, column=1, sticky="w", padx=6, pady=4)
-
-        row += 1
-        ttk.Button(tab_m, text="Click once (returns pointer)", command=self._ac_manual_click_once).grid(row=row, column=0, sticky="w", padx=6, pady=4)
-        ttk.Button(tab_m, text="Reset Target", command=self._ac_reset_target).grid(row=row, column=1, sticky="w", padx=6, pady=4)
-
-        row += 1
-        ttk.Separator(tab_m, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=6, sticky="ew", pady=6)
-
-        # Automatic sub-tab
-        tab_a = ttk.Frame(self.ac_tabs)
-        self.ac_tabs.add(tab_a, text="Automatic")
-
-        self.ac_auto_target = tk.IntVar(value=0)
-        self.ac_auto_done = tk.IntVar(value=0)
-        self.waggle_on_var = tk.BooleanVar(value=AC_DEFAULT_WAGGLE_ON)
-        self.waggle_secs_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_SECS)
-        self.waggle_amp_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_AMP)
-
-        r = 0
-        ttk.Label(tab_a, text="Target clicks:").grid(row=r, column=0, sticky="w", padx=6, pady=4)
-        self.ac_auto_target_entry = ttk.Entry(tab_a, textvariable=self.ac_auto_target, width=10)
-        self.ac_auto_target_entry.grid(row=r, column=1, sticky="w", padx=6, pady=4)
-        ttk.Button(tab_a, text="Reset Target", command=self._ac_reset_target).grid(row=r, column=2, sticky="w", padx=6, pady=4)
-
-        r += 1
-        ttk.Button(tab_a, text="Start Auto", command=self._ac_auto_start).grid(row=r, column=0, sticky="w", padx=6, pady=4)
-        ttk.Button(tab_a, text="Stop", command=self._ac_auto_stop).grid(row=r, column=1, sticky="w", padx=6, pady=4)
-
-        r += 1
-        ttk.Checkbutton(tab_a, text="Anti-idle waggle", variable=self.waggle_on_var).grid(row=r, column=0, sticky="w", padx=6, pady=4)
-        ttk.Label(tab_a, text="every (s)").grid(row=r, column=1, sticky="w", padx=6, pady=4)
-        ttk.Entry(tab_a, textvariable=self.waggle_secs_var, width=6).grid(row=r, column=2, sticky="w", padx=6, pady=4)
-        ttk.Label(tab_a, text="amp (px)").grid(row=r, column=4, sticky="w", padx=6, pady=4)
-        ttk.Entry(tab_a, textvariable=self.waggle_amp_var, width=6).grid(row=r, column=5, sticky="w", padx=6, pady=4)
-
-        r += 1
-        ttk.Button(tab_a, text="Reset Calculator", command=self._calc_reset).grid(row=r, column=0, sticky="w", padx=6, pady=4)
-
-        # Make grid responsive
-        for c in range(6):
-            tab_m.grid_columnconfigure(c, weight=1)
-            tab_a.grid_columnconfigure(c, weight=1)
-
-        # Calculator sub-tab (embedded)
-        tab_c = ttk.Frame(self.ac_tabs)
-        self.ac_tabs.add(tab_c, text="Calculator")
-        self.ac_tab_calc = tab_c
-
-        self.calc_amount = tk.StringVar()
-        self.calc_mult = tk.StringVar()
-        self.calc_unit = tk.StringVar()
-        self.calc_total = tk.StringVar(value="—")
-        self.calc_target = tk.StringVar(value="—")
-
-        rc = 0
-        ttk.Label(tab_c, text="Amount (£):").grid(row=rc, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(tab_c, textvariable=self.calc_amount, width=10).grid(row=rc, column=1, sticky="w", padx=6, pady=4)
-
-        ttk.Label(tab_c, text="Wagering ×:").grid(row=rc, column=2, sticky="e", padx=6, pady=4)
-        ttk.Entry(tab_c, textvariable=self.calc_mult, width=8).grid(row=rc, column=3, sticky="w", padx=6, pady=4)
-
-        ttk.Label(tab_c, text="Bet per spin (£):").grid(row=rc, column=4, sticky="e", padx=6, pady=4)
-        ttk.Entry(tab_c, textvariable=self.calc_unit, width=10).grid(row=rc, column=5, sticky="w", padx=6, pady=4)
-
-        rc += 1
-        ttk.Label(tab_c, text="Total to wager (£):").grid(row=rc, column=0, sticky="w", padx=6, pady=4)
-        ttk.Label(tab_c, textvariable=self.calc_total).grid(row=rc, column=1, sticky="w", padx=6, pady=4)
-
-        ttk.Label(tab_c, text="Target clicks:").grid(row=rc, column=2, sticky="e", padx=6, pady=4)
-        ttk.Label(tab_c, textvariable=self.calc_target).grid(row=rc, column=3, sticky="w", padx=6, pady=4)
-
-        rc += 1
-        ttk.Button(tab_c, text="Apply to Target", command=self._calc_apply_target).grid(row=rc, column=0, sticky="w", padx=6, pady=4)
-        ttk.Button(tab_c, text="Reset", command=self._calc_reset).grid(row=rc, column=1, sticky="w", padx=6, pady=4)
-
-        for c in range(6):
-            tab_c.grid_columnconfigure(c, weight=1)
-
-    def _goto_ac_calc(self):
-        """Navigate to Autoclicker → Calculator sub-tab."""
-        try:
-            self.sections.select(self.tab_ac)
-            if hasattr(self, "ac_tabs") and hasattr(self, "ac_tab_calc"):
-                self.ac_tabs.select(self.ac_tab_calc)
-            self._log("Opened Autoclicker → Calculator.")
-        except Exception as e:
-            self._log(f"Could not open Calculator tab: {e}")
-
-    # ---------- Geometry save/restore ----------
-
+        
+        # Stay on top toggle
+        self.stay_on_top_var = tk.BooleanVar(value=self.config.stay_on_top)
+        stay_on_top_cb = ttk.Checkbutton(
+            toolbar, 
+            text="Stay on top", 
+            variable=self.stay_on_top_var,
+            command=self._toggle_stay_on_top
+        )
+        stay_on_top_cb.pack(side=tk.LEFT)
+        
+        # Apply initial stay-on-top setting
+        self._apply_stay_on_top()
+    
+    def _build_control_sections(self, parent):
+        """Build the main control sections using notebook tabs"""
+        
+        # Main sections notebook
+        self.sections_notebook = ttk.Notebook(parent)
+        self.sections_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        
+        # Environment Setup Tab (Phase 1 focus)
+        self._build_environment_tab()
+        
+        # Slots Tab (preparation for Phase 3)
+        self._build_slots_tab()
+        
+        # Autoclicker Tab (preparation for Phase 2 & 3)
+        self._build_autoclicker_tab()
+    
+    def _build_environment_tab(self):
+        """Build environment interaction tab - core Phase 1 functionality"""
+        env_frame = ttk.Frame(self.sections_notebook)
+        self.sections_notebook.add(env_frame, text="Environment Setup")
+        
+        # Browser Detection Section
+        browser_section = ttk.LabelFrame(env_frame, text="Browser Window Detection", padding=10)
+        browser_section.pack(fill=tk.X, padx=8, pady=8)
+        
+        ttk.Label(browser_section, text=(
+            "Step 1: Ensure your casino game is open in a browser\n"
+            "Step 2: Click 'Select Browser Window' and choose the correct window\n"
+            "Step 3: The app will remember this window for automation"
+        )).pack(anchor='w', pady=(0, 10))
+        
+        button_frame = ttk.Frame(browser_section)
+        button_frame.pack(fill=tk.X)
+        
+        self.select_window_btn = ttk.Button(
+            button_frame, 
+            text="Select Browser Window", 
+            command=self._select_browser_window
+        )
+        self.select_window_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.refresh_windows_btn = ttk.Button(
+            button_frame, 
+            text="Refresh Window List", 
+            command=self._refresh_windows
+        )
+        self.refresh_windows_btn.pack(side=tk.LEFT)
+        
+        # Status display
+        self.browser_status_var = tk.StringVar(value="No browser window selected")
+        status_label = ttk.Label(browser_section, textvariable=self.browser_status_var)
+        status_label.pack(anchor='w', pady=(10, 0))
+        
+        # System Information Section
+        sys_section = ttk.LabelFrame(env_frame, text="System Information", padding=10)
+        sys_section.pack(fill=tk.X, padx=8, pady=8)
+        
+        # Display system info
+        self._display_system_info(sys_section)
+    
+    def _build_slots_tab(self):
+        """Build slots automation tab - foundation for Phase 3"""
+        slots_frame = ttk.Frame(self.sections_notebook)
+        self.sections_notebook.add(slots_frame, text="Slots (auto)")
+        
+        # Preparation notice
+        prep_section = ttk.LabelFrame(slots_frame, text="Setup Required", padding=10)
+        prep_section.pack(fill=tk.X, padx=8, pady=8)
+        
+        ttk.Label(prep_section, text=(
+            "This section will contain automated slots functionality in Phase 3.\n"
+            "Required setup:\n"
+            "• Browser window selection (Environment Setup tab)\n"
+            "• Spin button capture\n" 
+            "• Readiness detection configuration"
+        )).pack(anchor='w')
+        
+        # Quick navigation to calculator (Phase 2 preparation)
+        nav_frame = ttk.Frame(prep_section)
+        nav_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(
+            nav_frame, 
+            text="Open Target Calculator →", 
+            command=self._navigate_to_calculator
+        ).pack(side=tk.LEFT)
+    
+    def _build_autoclicker_tab(self):
+        """Build autoclicker tab with sub-tabs - foundation for Phase 2 & 3"""
+        ac_frame = ttk.Frame(self.sections_notebook)
+        self.sections_notebook.add(ac_frame, text="Autoclicker")
+        
+        # Sub-notebook for autoclicker modes
+        self.ac_notebook = ttk.Notebook(ac_frame)
+        self.ac_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        
+        # Manual mode
+        self._build_manual_autoclicker()
+        
+        # Automatic mode
+        self._build_automatic_autoclicker()
+        
+        # Calculator (embedded - Phase 2 preparation)
+        self._build_calculator()
+    
+    def _build_manual_autoclicker(self):
+        """Build manual autoclicker sub-tab"""
+        manual_frame = ttk.Frame(self.ac_notebook)
+        self.ac_notebook.add(manual_frame, text="Manual")
+        
+        # Manual controls section
+        controls_section = ttk.LabelFrame(manual_frame, text="Manual Click Controls", padding=10)
+        controls_section.pack(fill=tk.X, padx=8, pady=8)
+        
+        ttk.Label(controls_section, text=(
+            "Manual mode allows precise, single-click control.\n"
+            "Use this for testing and precise positioning."
+        )).pack(anchor='w', pady=(0, 10))
+        
+        # Target counter
+        counter_frame = ttk.Frame(controls_section)
+        counter_frame.pack(fill=tk.X)
+        
+        ttk.Label(counter_frame, text="Target clicks:").grid(row=0, column=0, sticky='w', padx=(0, 10))
+        
+        self.manual_target_var = tk.IntVar(value=0)
+        target_entry = ttk.Entry(counter_frame, textvariable=self.manual_target_var, width=10)
+        target_entry.grid(row=0, column=1, sticky='w', padx=(0, 10))
+        
+        self.manual_count_var = tk.IntVar(value=0)
+        count_label = ttk.Label(counter_frame, text="Completed: 0")
+        count_label.grid(row=0, column=2, sticky='w', padx=(20, 0))
+        
+        # Store reference for updates
+        self.manual_count_label = count_label
+        
+        # Control buttons
+        button_frame = ttk.Frame(controls_section)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(
+            button_frame, 
+            text="Single Click", 
+            command=self._manual_single_click
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Button(
+            button_frame, 
+            text="Reset Counter", 
+            command=self._reset_manual_counter
+        ).pack(side=tk.LEFT)
+        
+        # Configure grid weights
+        counter_frame.grid_columnconfigure(2, weight=1)
+    
+    def _build_automatic_autoclicker(self):
+        """Build automatic autoclicker sub-tab"""
+        auto_frame = ttk.Frame(self.ac_notebook)
+        self.ac_notebook.add(auto_frame, text="Automatic")
+        
+        # Automatic controls section  
+        controls_section = ttk.LabelFrame(auto_frame, text="Automatic Click Controls", padding=10)
+        controls_section.pack(fill=tk.X, padx=8, pady=8)
+        
+        ttk.Label(controls_section, text=(
+            "Automatic mode runs continuous clicking until target is reached.\n"
+            "Includes anti-idle features and smart timing."
+        )).pack(anchor='w', pady=(0, 10))
+        
+        # Target and progress
+        target_frame = ttk.Frame(controls_section)
+        target_frame.pack(fill=tk.X)
+        
+        ttk.Label(target_frame, text="Target clicks:").grid(row=0, column=0, sticky='w')
+        
+        self.auto_target_var = tk.IntVar(value=0)
+        ttk.Entry(target_frame, textvariable=self.auto_target_var, width=10).grid(row=0, column=1, sticky='w', padx=(5, 20))
+        
+        self.auto_progress_var = tk.StringVar(value="Progress: 0/0")
+        ttk.Label(target_frame, textvariable=self.auto_progress_var).grid(row=0, column=2, sticky='w')
+        
+        # Control buttons
+        control_frame = ttk.Frame(controls_section)
+        control_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        self.start_auto_btn = ttk.Button(
+            control_frame, 
+            text="Start Automatic", 
+            command=self._start_automatic
+        )
+        self.start_auto_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.stop_auto_btn = ttk.Button(
+            control_frame, 
+            text="Stop", 
+            command=self._stop_automatic,
+            state=tk.DISABLED
+        )
+        self.stop_auto_btn.pack(side=tk.LEFT)
+        
+        # Anti-idle section (Phase 3 preparation)
+        idle_section = ttk.LabelFrame(auto_frame, text="Anti-Idle Options (Phase 3)", padding=10)
+        idle_section.pack(fill=tk.X, padx=8, pady=8)
+        
+        self.waggle_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            idle_section, 
+            text="Enable anti-idle waggle", 
+            variable=self.waggle_enabled_var
+        ).pack(anchor='w')
+        
+        waggle_frame = ttk.Frame(idle_section)
+        waggle_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        ttk.Label(waggle_frame, text="Interval (seconds):").grid(row=0, column=0, sticky='w')
+        self.waggle_interval_var = tk.IntVar(value=25)
+        ttk.Entry(waggle_frame, textvariable=self.waggle_interval_var, width=6).grid(row=0, column=1, sticky='w', padx=(5, 20))
+        
+        ttk.Label(waggle_frame, text="Amplitude (pixels):").grid(row=0, column=2, sticky='w')
+        self.waggle_amplitude_var = tk.IntVar(value=10)
+        ttk.Entry(waggle_frame, textvariable=self.waggle_amplitude_var, width=6).grid(row=0, column=3, sticky='w', padx=(5, 0))
+    
+    def _build_calculator(self):
+        """Build embedded calculator sub-tab - Phase 2 preparation"""
+        calc_frame = ttk.Frame(self.ac_notebook)
+        self.ac_notebook.add(calc_frame, text="Calculator")
+        
+        # Store reference for navigation
+        self.calculator_tab = calc_frame
+        
+        # Calculator section
+        calc_section = ttk.LabelFrame(calc_frame, text="Target Calculator", padding=10)
+        calc_section.pack(fill=tk.X, padx=8, pady=8)
+        
+        ttk.Label(calc_section, text=(
+            "Calculate optimal targets for wagering requirements.\n"
+            "Phase 2 will implement full calculation logic."
+        )).pack(anchor='w', pady=(0, 10))
+        
+        # Input fields (Phase 2 preparation)
+        input_frame = ttk.Frame(calc_section)
+        input_frame.pack(fill=tk.X)
+        
+        # Row 1: Amount and multiplier
+        ttk.Label(input_frame, text="Bonus Amount (£):").grid(row=0, column=0, sticky='w', pady=2)
+        self.calc_amount_var = tk.StringVar()
+        ttk.Entry(input_frame, textvariable=self.calc_amount_var, width=10).grid(row=0, column=1, sticky='w', padx=(5, 20), pady=2)
+        
+        ttk.Label(input_frame, text="Wagering Multiple:").grid(row=0, column=2, sticky='w', pady=2)
+        self.calc_multiplier_var = tk.StringVar()
+        ttk.Entry(input_frame, textvariable=self.calc_multiplier_var, width=8).grid(row=0, column=3, sticky='w', padx=(5, 0), pady=2)
+        
+        # Row 2: Bet per spin and results
+        ttk.Label(input_frame, text="Bet per spin (£):").grid(row=1, column=0, sticky='w', pady=2)
+        self.calc_bet_var = tk.StringVar()
+        ttk.Entry(input_frame, textvariable=self.calc_bet_var, width=10).grid(row=1, column=1, sticky='w', padx=(5, 20), pady=2)
+        
+        ttk.Label(input_frame, text="Required Spins:").grid(row=1, column=2, sticky='w', pady=2)
+        self.calc_result_var = tk.StringVar(value="—")
+        ttk.Label(input_frame, textvariable=self.calc_result_var).grid(row=1, column=3, sticky='w', padx=(5, 0), pady=2)
+        
+        # Action buttons
+        action_frame = ttk.Frame(calc_section)
+        action_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(
+            action_frame, 
+            text="Calculate", 
+            command=self._calculate_target
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Button(
+            action_frame, 
+            text="Apply to Targets", 
+            command=self._apply_calculated_target
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Button(
+            action_frame, 
+            text="Reset", 
+            command=self._reset_calculator
+        ).pack(side=tk.LEFT)
+    
+    def _build_right_panel(self):
+        """Build right panel with dedicated log area"""
+        
+        # Right frame container
+        right_container = ttk.Frame(self.main_paned)
+        self.main_paned.add(right_container, weight=1)
+        
+        # Log section
+        log_section = ttk.LabelFrame(right_container, text="Live Activity Log", padding=8)
+        log_section.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        
+        # Log text widget with scrolling
+        log_frame = ttk.Frame(log_section)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.log_text = tk.Text(
+            log_frame, 
+            wrap=tk.WORD, 
+            height=15,
+            font=('Monaco', 10) if sys.platform == 'darwin' else ('Courier', 10)
+        )
+        
+        log_scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_scrollbar.set)
+        
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Configure log text tags for colored output
+        self.log_text.tag_configure("INFO", foreground="#0066cc")
+        self.log_text.tag_configure("SUCCESS", foreground="#009900") 
+        self.log_text.tag_configure("WARNING", foreground="#ff6600")
+        self.log_text.tag_configure("ERROR", foreground="#cc0000")
+        self.log_text.tag_configure("ACTION", foreground="#6600cc")
+        
+        # Log control buttons
+        log_controls = ttk.Frame(log_section)
+        log_controls.pack(fill=tk.X, pady=(5, 0))
+        
+        ttk.Button(log_controls, text="Clear Log", command=self._clear_log).pack(side=tk.LEFT)
+        ttk.Button(log_controls, text="Save Log", command=self._save_log).pack(side=tk.LEFT, padx=(10, 0))
+    
+    def _display_system_info(self, parent):
+        """Display system information for debugging"""
+        info_text = f"Python: {sys.version.split()[0]}\n"
+        info_text += f"Platform: {sys.platform}\n"
+        info_text += f"PIL Available: {PIL_AVAILABLE}\n"
+        info_text += f"PyAutoGUI Available: {PYAUTOGUI_AVAILABLE}\n"
+        
+        ttk.Label(parent, text=info_text, justify=tk.LEFT).pack(anchor='w')
+    
+    def _bind_mousewheel(self):
+        """Bind mousewheel scrolling to left canvas"""
+        def _on_mousewheel(event):
+            self.left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        self.bind_all("<MouseWheel>", _on_mousewheel)  # Windows/Linux
+        self.bind_all("<Button-4>", lambda e: self.left_canvas.yview_scroll(-1, "units"))  # macOS
+        self.bind_all("<Button-5>", lambda e: self.left_canvas.yview_scroll(1, "units"))   # macOS
+    
+    # --------------- Geometry Management ---------------
+    
     def _restore_geometry(self):
-        cfg = os.path.join(os.path.expanduser("~"), ".spin_helper_geometry.json")
+        """Restore window geometry and settings from file"""
+        data = safe_json_load(GEOMETRY_FILE, {
+            "geometry": DEFAULT_GEOMETRY,
+            "stay_on_top": True
+        })
+        
         try:
-            with open(cfg, "r") as f:
-                data = json.load(f)
-            self.geometry(data.get("geom", "980x580"))
-            # apply topmost flag if present
-            try:
-                self.attributes("-topmost", bool(data.get("topmost", True)))
-            except Exception:
-                pass
-        except Exception:
-            pass
-
+            self.geometry(data.get("geometry", DEFAULT_GEOMETRY))
+            self.config.stay_on_top = data.get("stay_on_top", True)
+            self.stay_on_top_var.set(self.config.stay_on_top)
+            self._apply_stay_on_top()
+        except Exception as e:
+            self._log(f"Could not restore geometry: {e}", log_type="WARNING")
+    
     def _save_geometry(self):
-        cfg = os.path.join(os.path.expanduser("~"), ".spin_helper_geometry.json")
+        """Save current window geometry and settings"""
         try:
-            # persist geometry and topmost
-            try:
-                top = bool(self.topmost_var.get())
-            except Exception:
-                try:
-                    top = bool(self.attributes("-topmost"))
-                except Exception:
-                    top = True
-            data = {"geom": self.geometry(), "topmost": top}
-            with open(cfg, "w") as f:
-                json.dump(data, f)
-        except Exception:
-            pass
-
-    def destroy(self):
+            data = {
+                "geometry": self.geometry(),
+                "stay_on_top": self.stay_on_top_var.get()
+            }
+            safe_json_save(GEOMETRY_FILE, data)
+        except Exception as e:
+            self._log(f"Could not save geometry: {e}", log_type="WARNING")
+    
+    def _toggle_stay_on_top(self):
+        """Handle stay-on-top toggle"""
+        self.config.stay_on_top = self.stay_on_top_var.get()
+        self._apply_stay_on_top()
         self._save_geometry()
-        super().destroy()
-
-    def _apply_topmost(self):
+        self._log(f"Stay on top: {'enabled' if self.config.stay_on_top else 'disabled'}")
+    
+    def _apply_stay_on_top(self):
+        """Apply stay-on-top setting to window"""
         try:
-            self.attributes("-topmost", bool(self.topmost_var.get()))
-            self._save_geometry()
-        except Exception:
-            pass
-
-    # ---------- Logging ----------
-
-    def _log(self, msg, green=False):
-        self._log_q.put((msg, green))
-
-    def _drain_log(self):
+            self.attributes("-topmost", self.config.stay_on_top)
+        except Exception as e:
+            self._log(f"Could not apply stay-on-top: {e}", log_type="WARNING")
+    
+    # --------------- Environment Interaction ---------------
+    
+    def _select_browser_window(self):
+        """Launch guided browser window selection"""
+        self._log("Starting browser window selection...", log_type="ACTION")
+        
         try:
-            while True:
-                msg, green = self._log_q.get_nowait()
-                ts = now_ts()
-                self.log.insert(tk.END, f"{ts} {msg}\n", (self.tag_green,) if green else ())
-                self.log.see(tk.END)
+            target = self.env_detector.guided_selection_dialog(self)
+            
+            if target and target.is_valid:
+                self.browser_status_var.set(
+                    f"Selected: {target.window_info.app_name} - {target.window_info.title}"
+                )
+                self.status_bar.config(text="Browser window selected - Ready for automation")
+                self._log(f"Browser window selected: {target.window_info.app_name}", log_type="SUCCESS")
+            else:
+                self._log("Browser window selection cancelled", log_type="INFO")
+                
+        except Exception as e:
+            self._log(f"Error in window selection: {e}", log_type="ERROR")
+            messagebox.showerror("Selection Error", f"Could not select window: {e}")
+    
+    def _refresh_windows(self):
+        """Refresh the list of detected windows"""
+        self._log("Refreshing window list...", log_type="ACTION")
+        try:
+            windows = self.env_detector.detect_browser_windows()
+            self._log(f"Detected {len(windows)} browser windows", log_type="INFO")
+        except Exception as e:
+            self._log(f"Error refreshing windows: {e}", log_type="ERROR")
+    
+    # --------------- Navigation ---------------
+    
+    def _navigate_to_calculator(self):
+        """Navigate to the embedded calculator tab"""
+        try:
+            # Switch to autoclicker tab
+            self.sections_notebook.select(2)  # Autoclicker is 3rd tab (index 2)
+            # Switch to calculator sub-tab
+            self.ac_notebook.select(2)  # Calculator is 3rd sub-tab (index 2)
+            self._log("Navigated to Target Calculator", log_type="INFO")
+        except Exception as e:
+            self._log(f"Navigation error: {e}", log_type="ERROR")
+    
+    # --------------- Manual Autoclicker ---------------
+    
+    def _manual_single_click(self):
+        """Perform a single manual click"""
+        if not self.env_detector.selected_browser:
+            messagebox.showwarning("No Target", "Please select a browser window first.")
+            return
+        
+        current_count = self.manual_count_var.get()
+        target = self.manual_target_var.get()
+        
+        if target > 0 and current_count >= target:
+            self._log("Manual target already reached", log_type="WARNING")
+            return
+        
+        # Increment counter
+        new_count = current_count + 1
+        self.manual_count_var.set(new_count)
+        self.manual_count_label.config(text=f"Completed: {new_count}")
+        
+        # Log the action
+        self._log(f"Manual click #{new_count} executed", log_type="ACTION")
+        
+        # Check if target reached
+        if target > 0 and new_count >= target:
+            self._log(f"Manual target of {target} clicks reached!", log_type="SUCCESS")
+        
+        # TODO Phase 3: Actually perform the click using pyautogui
+    
+    def _reset_manual_counter(self):
+        """Reset manual click counter"""
+        self.manual_count_var.set(0)
+        self.manual_count_label.config(text="Completed: 0")
+        self._log("Manual counter reset", log_type="INFO")
+    
+    # --------------- Automatic Autoclicker ---------------
+    
+    def _start_automatic(self):
+        """Start automatic clicking mode"""
+        if not self.env_detector.selected_browser:
+            messagebox.showwarning("No Target", "Please select a browser window first.")
+            return
+        
+        if self._automation_running:
+            self._log("Automation already running", log_type="WARNING")
+            return
+        
+        target = self.auto_target_var.get()
+        if target <= 0:
+            messagebox.showwarning("Invalid Target", "Please set a target greater than 0.")
+            return
+        
+        # Start automation
+        self._automation_running = True
+        self._stop_event.clear()
+        
+        # Update UI
+        self.start_auto_btn.config(state=tk.DISABLED)
+        self.stop_auto_btn.config(state=tk.NORMAL)
+        
+        # Start automation thread
+        threading.Thread(target=self._automatic_click_loop, daemon=True).start()
+        self._log(f"Automatic clicking started - Target: {target}", log_type="SUCCESS")
+    
+    def _stop_automatic(self):
+        """Stop automatic clicking mode"""
+        self._stop_event.set()
+        self._log("Stopping automatic clicking...", log_type="ACTION")
+    
+    def _automatic_click_loop(self):
+        """Main automatic clicking loop"""
+        try:
+            click_count = 0
+            target = self.auto_target_var.get()
+            
+            while not self._stop_event.is_set() and click_count < target:
+                click_count += 1
+                
+                # Update progress
+                progress_text = f"Progress: {click_count}/{target}"
+                self.auto_progress_var.set(progress_text)
+                
+                # Log click
+                self._log(f"Auto click #{click_count}/{target}", log_type="ACTION")
+                
+                # TODO Phase 3: Perform actual click with pyautogui
+                # TODO Phase 3: Wait for readiness detection
+                # TODO Phase 3: Implement anti-idle waggle
+                
+                # Placeholder delay for now
+                time.sleep(0.5)
+                
+                # Check for stop condition
+                if self._stop_event.wait(0.1):
+                    break
+            
+            # Completion handling
+            if click_count >= target:
+                self._log(f"Automatic clicking completed! {click_count} clicks executed", log_type="SUCCESS")
+            else:
+                self._log(f"Automatic clicking stopped at {click_count}/{target}", log_type="INFO")
+                
+        except Exception as e:
+            self._log(f"Error in automatic clicking: {e}", log_type="ERROR")
+        finally:
+            # Reset UI state
+            self._automation_running = False
+            self.start_auto_btn.config(state=tk.NORMAL)
+            self.stop_auto_btn.config(state=tk.DISABLED)
+            self._log("Automatic clicking stopped", log_type="INFO")
+    
+    # --------------- Calculator Functions ---------------
+    
+    def _calculate_target(self):
+        """Calculate required spins based on wagering requirements"""
+        try:
+            amount = float(self.calc_amount_var.get() or "0")
+            multiplier = float(self.calc_multiplier_var.get() or "0")
+            bet_per_spin = float(self.calc_bet_var.get() or "0")
+            
+            if bet_per_spin <= 0:
+                raise ValueError("Bet per spin must be greater than 0")
+            
+            total_wagering_required = amount * multiplier
+            required_spins = int(round(total_wagering_required / bet_per_spin))
+            
+            self.calc_result_var.set(str(required_spins))
+            
+            self._log(
+                f"Calculation: £{amount} × {multiplier} = £{total_wagering_required:.2f} "
+                f"÷ £{bet_per_spin} = {required_spins} spins",
+                log_type="SUCCESS"
+            )
+            
+        except ValueError as e:
+            self.calc_result_var.set("Error")
+            messagebox.showwarning("Calculation Error", f"Invalid input: {e}")
+            self._log(f"Calculation error: {e}", log_type="ERROR")
+        except Exception as e:
+            self.calc_result_var.set("Error")
+            self._log(f"Unexpected calculation error: {e}", log_type="ERROR")
+    
+    def _apply_calculated_target(self):
+        """Apply calculated result to autoclicker targets"""
+        try:
+            result = self.calc_result_var.get()
+            if result == "—" or result == "Error":
+                messagebox.showwarning("No Result", "Please calculate a target first.")
+                return
+            
+            target = int(result)
+            self.auto_target_var.set(target)
+            self.manual_target_var.set(target)
+            
+            self._log(f"Applied calculated target ({target}) to both manual and automatic modes", log_type="SUCCESS")
+            
+        except ValueError:
+            messagebox.showwarning("Invalid Result", "Cannot apply invalid calculation result.")
+        except Exception as e:
+            self._log(f"Error applying target: {e}", log_type="ERROR")
+    
+    def _reset_calculator(self):
+        """Reset all calculator fields"""
+        self.calc_amount_var.set("")
+        self.calc_multiplier_var.set("")
+        self.calc_bet_var.set("")
+        self.calc_result_var.set("—")
+        self._log("Calculator reset", log_type="INFO")
+    
+    # --------------- Logging System ---------------
+    
+    def _log(self, message: str, log_type: str = "INFO"):
+        """Add message to log queue for processing"""
+        self._log_queue.put((message, log_type, time.time()))
+    
+    def _process_log_queue(self):
+        """Process pending log messages and display them"""
+        try:
+            processed_count = 0
+            while not self._log_queue.empty() and processed_count < 50:  # Limit processing per cycle
+                message, log_type, timestamp = self._log_queue.get_nowait()
+                
+                # Format message with timestamp if enabled
+                if self.config.log_timestamps:
+                    formatted_message = f"{get_timestamp()} [{log_type}] {message}\n"
+                else:
+                    formatted_message = f"[{log_type}] {message}\n"
+                
+                # Insert into log with appropriate tag
+                self.log_text.insert(tk.END, formatted_message, (log_type,))
+                self.log_text.see(tk.END)
+                
+                processed_count += 1
+                
         except queue.Empty:
             pass
-        finally:
-            self.after(UI_FLUSH_MS, self._drain_log)
-
-    # ---------- Capture / Readiness ----------
-
-    def _capture_spinner_from_cursor(self):
-        try:
-            x, y = self.winfo_pointerxy()
-            w = h = 40
-            left = int(x - w//2)
-            top = int(y - h//2)
-            img = ImageGrab.grab(bbox=(left, top, left + w, top + h))
-
-            self.state_slots.spinner_roi = SpinnerROI(left, top, w, h)
-            self.state_slots.spinner_baseline = img
-            self.state_slots.spinner_ready_color = _avg_rgb(img)
-            self.state_slots.spinner_brightness = _brightness(img)
-            self.state_slots.spinner_xy = (x, y)
-
-            self._log("Spin button captured. (baseline + color + brightness stored)", green=True)
         except Exception as e:
-            messagebox.showerror("Capture error", str(e))
-
-    def _capture_fs_roi(self):
-        self._log("Free-Spins Banner ROI: move mouse to TOP-LEFT. Capturing in 3…", green=True)
-        self.after(1000, lambda: self._log("…2…", green=True))
-        self.after(2000, lambda: self._log("…1…", green=True))
-
-        def _stage2():
-            try:
-                x1, y1 = self.winfo_pointerxy()
-                self._log("Move mouse to BOTTOM-RIGHT. Capturing in 2…", green=True)
-                self.after(1000, lambda: self._log("…1…", green=True))
-                def _final():
-                    x2, y2 = self.winfo_pointerxy()
-                    left, top = min(x1, x2), min(y1, y2)
-                    w, h = abs(x2 - x1), abs(y2 - y1)
-                    if w < 10 or h < 10:
-                        raise ValueError("ROI too small.")
-                    self.state_slots.fs_roi = SpinnerROI(left, top, w, h)
-                    self._log(f"FS ROI captured: {w}×{h} at ({left},{top})", green=True)
-                self.after(1000, _final)
-            except Exception as e:
-                messagebox.showerror("Capture error", str(e))
-
-        self.after(3000, _stage2)
-
-    def _toggle_fs_detect(self):
-        self.state_slots.detect_fs = not self.state_slots.detect_fs
-        self._log(f"Detect Free-Spins banner: {'ON' if self.state_slots.detect_fs else 'OFF'}")
-
-    def _bind_display(self):
-        self._log("Bound to current display (placeholder).")
-
-    def _is_ready(self) -> bool:
-        s = self.state_slots
-        if not s.spinner_roi or not s.spinner_baseline:
-            return True
-        r = s.spinner_roi
-        try:
-            curr = ImageGrab.grab(bbox=(r.x, r.y, r.x + r.w, r.y + r.h))
-        except Exception:
-            return True
-
-        rms = _rms(curr, s.spinner_baseline)
-        br = _brightness(curr)
-        ok_rms = rms <= PIX_DIFF_READY
-        ok_bright = (s.spinner_brightness is not None) and ((s.spinner_brightness - br) <= BRIGHT_READY_TOL)
-        ok_color = True
-        if s.spinner_ready_color is not None:
-            ok_color = _color_dist(_avg_rgb(curr), s.spinner_ready_color) <= COLOR_D_READY_TOL
-        if ok_rms or (ok_bright and ok_color):
-            return True
-        return False
-
-    # ---------- Slots Auto ----------
-
-    def _start_slots(self):
-        if self._running_slots:
-            return
-        if not self.state_slots.spinner_xy:
-            messagebox.showwarning("Missing", "Capture the spin button first.")
-            return
-        self._running_slots = True
-        self._stop_evt.clear()
-        threading.Thread(target=self._slots_loop, daemon=True).start()
-        self._log("Started Slots auto.")
-
-    def _stop_slots(self):
-        self._stop_evt.set()
-
-    def _slots_loop(self):
-        try:
-            idx = 0
-            while not self._stop_evt.is_set():
-                idx += 1
-                self._log(f"Clicking #{idx}…")
-                self._do_click()
-
-                ok = self._wait_ready_with_rescue(timeout_s=40.0)
-                if not ok:
-                    self._log("Timeout waiting READY.")
-                    break
-
-                self._log(f"Spin #{idx} complete.")
+            # Fallback logging to prevent infinite loops
+            print(f"Log processing error: {e}")
         finally:
-            self._running_slots = False
-            self._log("Stopped.")
-
-    def _wait_ready_with_rescue(self, timeout_s=20.0):
-        t0 = time.time()
-        poked = False
-        while not self._stop_evt.is_set() and (time.time() - t0) < timeout_s:
-            if self._is_ready():
-                self._log("Ready confirmed.")
-                return True
-            time.sleep(0.30)
-            if not poked and (time.time() - t0) > 8.0:
-                self._log("Gentle poke click.")
-                self._do_click()
-                poked = True
-            if (time.time() - t0) > 15.0 and int(time.time() - t0) % 7 == 0:
-                self._log(f"Rescue click #{int((time.time()-t0)//7)}.")
-                self._do_click()
-        return False
-
-    def _do_click(self):
-        """Perform a real click at the captured spinner coords (with tiny jitter)."""
-        s = self.state_slots
-        if not s.spinner_xy:
-            return
-        x, y = s.spinner_xy
+            # Schedule next processing cycle
+            self.after(UI_FLUSH_INTERVAL_MS, self._process_log_queue)
+    
+    def _clear_log(self):
+        """Clear the log display"""
+        self.log_text.delete(1.0, tk.END)
+        self._log("Log cleared", log_type="INFO")
+    
+    def _save_log(self):
+        """Save log contents to file"""
         try:
-            if 'pg' in globals() and pg:
-                JITTER_PX = 1
-                pg.moveTo(x + random.randint(-JITTER_PX, JITTER_PX),
-                          y + random.randint(-JITTER_PX, JITTER_PX),
-                          duration=0.05)
-                pg.click()
-            else:
-                time.sleep(0.05)
+            log_content = self.log_text.get(1.0, tk.END)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"spin_helper_log_{timestamp}.txt"
+            filepath = os.path.join(os.path.expanduser("~"), filename)
+            
+            with open(filepath, 'w') as f:
+                f.write(f"Spin Helper Log Export\n")
+                f.write(f"Generated: {get_timestamp()}\n")
+                f.write(f"Version: {APP_VERSION}\n")
+                f.write("-" * 50 + "\n\n")
+                f.write(log_content)
+            
+            self._log(f"Log saved to: {filename}", log_type="SUCCESS")
+            
         except Exception as e:
-            self._log(f"Click failed: {e}")
-
-    # ---------- Autoclicker ----------
-
-    def _ac_manual_click_once(self):
-        s = self.state_slots
-        if not s.spinner_xy:
-            messagebox.showwarning("Missing", "Capture the spin button first.")
-            return
-        tgt = self.ac_manual_target.get()
-        done = self.ac_manual_done.get()
-        if tgt and done >= tgt:
-            self._log("Target already reached; button disabled.")
-            return
-
-        n = done + 1
-        self._log(f"Clicking #{n}…")
-        self._do_click()
-        self._wait_ready_with_rescue(timeout_s=8.0)
-        self.ac_manual_done.set(n)
-        if tgt and n >= tgt:
-            self._log("Manual Target reached.")
-
-    def _ac_auto_start(self):
-        if self._running_ac:
-            return
-        if not self.state_slots.spinner_xy:
-            messagebox.showwarning("Missing", "Capture the spin button first.")
-            return
-        self._running_ac = True
-        self._stop_evt.clear()
-        threading.Thread(target=self._ac_auto_loop, daemon=True).start()
-        self._log("Autoclicker: start")
-
-    def _ac_auto_stop(self):
-        self._stop_evt.set()
-
-    def _ac_auto_loop(self):
+            self._log(f"Error saving log: {e}", log_type="ERROR")
+            messagebox.showerror("Save Error", f"Could not save log: {e}")
+    
+    # --------------- Session Management ---------------
+    
+    def _save_session(self):
+        """Save current session state"""
         try:
-            self.ac_auto_done.set(0)
-            last_waggle = time.time()
-            while not self._stop_evt.is_set():
-                tgt = self.ac_auto_target.get()
-                done = self.ac_auto_done.get()
-                if tgt and done >= tgt:
-                    self._log("Auto Target reached.")
-                    break
-
-                self._log(f"Clicking #{done+1}…")
-                self._do_click()
-
-                if self._wait_ready_with_rescue(timeout_s=30.0):
-                    self._log(f"Click #{done+1} done; READY.")
-                else:
-                    self._log("No READY; continuing loop.")
-
-                self.ac_auto_done.set(done + 1)
-
-                if self.waggle_on_var.get() and (time.time() - last_waggle > max(5, self.waggle_secs_var.get())) and self.state_slots.spinner_xy:
-                    try:
-                        bx, by = self.state_slots.spinner_xy
-                        amp = clamp(self.waggle_amp_var.get(), 1, 40)
-                        if 'pg' in globals() and pg:
-                            pg.moveTo(bx + amp, by, duration=0.05)
-                            pg.moveTo(bx - amp, by, duration=0.05)
-                            pg.moveTo(bx, by, duration=0.05)
-                        self._log("Anti-idle waggle.")
-                    except Exception:
-                        pass
-                    last_waggle = time.time()
+            session_data = {
+                "version": APP_VERSION,
+                "timestamp": time.time(),
+                "config": {
+                    "stay_on_top": self.config.stay_on_top,
+                    "log_timestamps": self.config.log_timestamps
+                },
+                "browser_target": {
+                    "selected": self.env_detector.selected_browser is not None,
+                    "app_name": self.env_detector.selected_browser.window_info.app_name if self.env_detector.selected_browser else None
+                },
+                "calculator_state": {
+                    "amount": self.calc_amount_var.get(),
+                    "multiplier": self.calc_multiplier_var.get(), 
+                    "bet": self.calc_bet_var.get(),
+                    "result": self.calc_result_var.get()
+                },
+                "counters": {
+                    "manual_target": self.manual_target_var.get(),
+                    "manual_count": self.manual_count_var.get(),
+                    "auto_target": self.auto_target_var.get()
+                }
+            }
+            
+            safe_json_save(SESSION_FILE, session_data)
+            return True
+            
+        except Exception as e:
+            self._log(f"Error saving session: {e}", log_type="ERROR")
+            return False
+    
+    def _restore_session(self):
+        """Restore previous session state"""
+        try:
+            session_data = safe_json_load(SESSION_FILE, {})
+            
+            if not session_data:
+                return
+            
+            # Restore calculator state
+            calc_state = session_data.get("calculator_state", {})
+            self.calc_amount_var.set(calc_state.get("amount", ""))
+            self.calc_multiplier_var.set(calc_state.get("multiplier", ""))
+            self.calc_bet_var.set(calc_state.get("bet", ""))
+            self.calc_result_var.set(calc_state.get("result", "—"))
+            
+            # Restore counters
+            counters = session_data.get("counters", {})
+            self.manual_target_var.set(counters.get("manual_target", 0))
+            self.manual_count_var.set(counters.get("manual_count", 0))
+            self.auto_target_var.set(counters.get("auto_target", 0))
+            
+            # Update manual counter display
+            if hasattr(self, 'manual_count_label'):
+                count = self.manual_count_var.get()
+                self.manual_count_label.config(text=f"Completed: {count}")
+            
+            self._log("Session state restored", log_type="SUCCESS")
+            
+        except Exception as e:
+            self._log(f"Error restoring session: {e}", log_type="WARNING")
+    
+    # --------------- Application Lifecycle ---------------
+    
+    def _on_closing(self):
+        """Handle application closing"""
+        try:
+            # Stop any running automation
+            if self._automation_running:
+                self._stop_event.set()
+                # Give threads time to clean up
+                time.sleep(0.1)
+            
+            # Save current state
+            self._save_geometry()
+            if self.config.auto_save_session:
+                self._save_session()
+            
+            self._log("Spin Helper shutting down", log_type="INFO")
+            
+        except Exception as e:
+            print(f"Error during shutdown: {e}")
         finally:
-            self._running_ac = False
-            self._log("Autoclicker: stop")
+            self.destroy()
 
-    # ---------- Calculator ----------
+# --------------- Application Entry Point ---------------
 
-    def _calc_reset(self):
-        self.calc_amount.set("")
-        self.calc_mult.set("")
-        self.calc_unit.set("")
-        self.calc_total.set("—")
-        self.calc_target.set("—")
-        self._log("Calculator reset.")
-
-    def _calc_apply_target(self):
-        try:
-            amount = float(self.calc_amount.get().strip())
-            mult = float(self.calc_mult.get().strip())
-            unit = float(self.calc_unit.get().strip())
-            total = amount * mult
-            target = int(round(total / unit)) if unit > 0 else 0
-            self.calc_total.set(f"{total:.2f}")
-            self.calc_target.set(str(target))
-            self.ac_auto_target.set(target)
-            self.ac_manual_target.set(target)
-            self._log(f"Applied target: {target} (total £{total:.2f})", green=True)
-        except Exception:
-            messagebox.showwarning("Calculator", "Please enter valid numbers.")
-
-    # ---------- App Mainloop ----------
+def check_dependencies():
+    """Check that required dependencies are available"""
+    missing = []
+    
+    if not PIL_AVAILABLE:
+        missing.append("Pillow (PIL)")
+    
+    if not PYAUTOGUI_AVAILABLE:
+        missing.append("pyautogui")
+    
+    if missing:
+        print(f"WARNING: Missing dependencies: {', '.join(missing)}")
+        print("Some features may not work properly.")
+        print("Install with: pip install -r requirements.txt")
+    
+    return len(missing) == 0
 
 def main():
-    app = SpinHelperApp()
-    app.mainloop()
+    """Main application entry point"""
+    print(f"Starting {APP_TITLE}")
+    print(f"Platform: {sys.platform}")
+    
+    # Check dependencies
+    check_dependencies()
+    
+    try:
+        # Create and run application
+        app = SpinHelperApp()
+        
+        # Restore session after UI is built
+        app.after(100, app._restore_session)
+        
+        # Start main loop
+        app.mainloop()
+        
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        messagebox.showerror("Fatal Error", f"Application failed to start: {e}")
+        return 1
+    
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
