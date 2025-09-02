@@ -1,4 +1,17 @@
+# Spin Helper v2.0.0 Dependencies
+# Updated: September 2, 2025
+
+# Core automation library
 pyautogui>=0.9.54
-pynput>=1.7.7
+
+# Image processing and computer vision
 pillow>=10.3.0
+
+# Input monitoring (for keyboard shortcuts - Phase 3)
+pynput>=1.7.7
+
+# Optional OCR capability for text detection (future phases)
 pytesseract>=0.3.10
+
+# Note: tkinter is included with Python standard library
+# Note: subprocess is included with Python standard library (used for AppleScript)
