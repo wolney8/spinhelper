@@ -1,0 +1,156 @@
+Project Plan: Spin Helper - A Matched Betting Casino Offer Automation Tool
+1. Project Overview
+Project Name: "Spin Helper" - An AI-driven Matched Betting Casino Offer Automation Tool for Mac OS.
+
+Project Goal: To create a full-featured, native Mac OS GUI application that provides tools and automation to increase the speed and efficiency of completing matched betting casino offers. The app will be built on Google UX/UI design principles, use matched betting terminology, and offer live, detailed logging to the user. The ultimate aim is to provide a robust, reliable, and user-friendly assistant that manages the repetitive and time-consuming aspects of casino offers, allowing the user to focus on strategy and analysis.
+
+Target User: Experienced and new matched bettors using Mac OS who want to streamline the process of completing wagering requirements and bonus conversions on online casino sites. This tool is designed for users who are already familiar with the core concepts of matched betting and are looking for a competitive edge through automation and precise tracking.
+
+Key Design Principles:
+
+User-Centric: The user must always have ultimate control and a clear understanding of the app's actions. The interface will be designed to be intuitive and non-intimidating, avoiding jargon where possible and providing clear feedback. This includes easy-to-access controls for starting, pausing, and stopping all automation, ensuring the user can intervene at any moment. The embedded calculator and single-window design eliminate pop-ups and fragmentation, keeping the user in a single, focused workspace.
+
+Native & Lightweight: The app will run natively on Mac OS, ensuring a seamless user experience that is resource-efficient and fast. A core feature will be the ability for the main application window to be set as "stay on top," allowing the user to keep the tool visible and accessible alongside their browser window, regardless of what other applications are open. This is crucial for real-time monitoring and interaction. The application's window geometry and state will be persisted across launches.
+
+Exceptional Live Logging: All actions, calculations, and detected events will be displayed in real-time within a dedicated logging panel. This provides a transparent view into the app's operations, building user confidence and serving as an invaluable tool for debugging issues or understanding why a specific action was or was not performed. The log will be the primary source of feedback for the user, providing a structured record of all activity.
+
+Modularity: Development will be broken down into self-contained modules to facilitate iterative development and prevent regression. Each feature, from the wagering calculator to the screen detection logic, will be built as a separate component, allowing for independent testing and easier maintenance. This approach ensures a stable and robust final product.
+
+2. Technology Stack & Environment
+Platform: Mac OS (native GUI application). This focus on a single operating system allows for deep integration and optimization, leveraging Mac-specific features like Stage Manager and multi-monitor setups.
+
+Core Language: Python 3.9+. Python's rich ecosystem of libraries for GUI development, system automation, and computer vision makes it the ideal choice for this project.
+
+GUI Framework: The tkinter library, a standard Python library, will be used. This choice ensures a lightweight, no-install-required GUI framework that is fully compatible with native Mac OS window behavior, including the "stay on top" setting. The UI will be carefully styled to achieve a simple, clean, and deterministic aesthetic.
+
+Browser Interaction: The app will use pyautogui for all mouse movements and clicks. Pillow will be used for all image processing, including screen capture, and opencv-python will serve as the foundation for screen-based visual detection and pattern matching. The challenge of a dynamic, multi-monitor environment with features like Stage Manager will be solved by a guided user-selection process, which provides a fixed reference point for the automation logic.
+
+3. Project Development Phases
+This project plan is a living document and will be updated as each phase is completed. The development will be conducted iteratively, with a focus on delivering a stable, functional app at the end of each phase, building on the success of the previous one.
+
+Phase 1: Foundational Framework & User Interface (MVP)
+Objective: To establish the core application shell, a basic user interface, and the ability to detect and interact with the Mac OS desktop environment. This phase creates the foundation upon which all other features will be built.
+
+Deliverables:
+
+GUI Shell: A main application window designed with a clean, two-panel layout. A left-side control panel will contain the primary "Start," "Stop," and "Reset" buttons, as well as configuration options. A right-side panel will be dedicated to the large, dedicated log output area for real-time status messages. This window will have a simple, professional appearance and will be coded with the "stay on top" setting.
+
+Environment Interaction Module: This module will be the app's link to the user's desktop. It will have the functionality to list all currently open applications and their window titles. A key feature will be a guided user-selection process where a dialog box will prompt the user to click on the browser window they wish to control. The app will then programmatically capture and store the unique identifier of that window, allowing it to accurately track the specific browser tab with the casino game, even if the user moves it between screens or uses Stage Manager.
+
+Next Steps for AI:
+
+Build the core Python GUI application shell using tkinter based on the specifications above.
+
+Implement the window detection and selection module, including the guided user-selection dialog.
+
+Phase 2: Core Calculators & Manual Tracking Tools
+Objective: To provide the user with the essential calculators and manual tracking tools that are fundamental to matched betting casino offers. These tools offer immediate value to the user even without automation.
+
+Deliverables:
+
+Embedded Target Calculator: A detailed tool that takes user input for multiple variables, including:
+
+Wagering Requirement (e.g., $1,000)
+
+Game RTP (Return to Player, e.g., 96.5%)
+
+Bonus Amount (e.g., $50)
+
+Spin Value (e.g., $0.20)
+The calculator will then instantly output:
+
+Expected Value (EV) of the offer.
+
+Required number of spins to complete the wager.
+
+Estimated profit/loss based on the calculated EV. The calculator will be embedded in a sub-tab within the Autoclicker section.
+
+Spin Counter / Click Tracker: A simple, on-screen counter that can be incremented manually by the user with a pre-configured keyboard shortcut or a dedicated button within the app. This counter will be a persistent display, allowing the user to keep track of their progress even when not using automation.
+
+Live User-Triggered Logging:
+
+Every time the user manually clicks to increment the spin count, a log entry will be added (e.g., [ACTION] - Manual spin count incremented to 12.).
+
+Each time a calculation is performed, a log entry will display the inputs and the resulting outputs, providing a clear audit trail (e.g., [INFO] - Wagering calculation completed. EV: $12.50, Spins: 5,000.).
+
+Persistent Data Storage: Implement a system to save and load user-entered data and offer details to a local JSON file in the user's home directory. This allows the user to close the app and resume their session later without losing their progress. Data points to be saved will include offer name, current spin count, and calculator inputs.
+
+Next Steps for AI:
+
+Integrate the wagering calculator functionality into the app, complete with input fields and a clear output area.
+
+Implement the manual spin counter and a keyboard listener to increment it.
+
+Create a data persistence module to save/load user data to a local file.
+
+Phase 3: Automation & Visual Detection
+Objective: To introduce the core automation features, allowing the app to interact with the casino game automatically and intelligently.
+
+Deliverables:
+
+Automated Mouse & Click Module: This module will use the pyautogui library to move the mouse and perform clicks. It will be configured by the user, who will be able to select a specific, on-screen coordinate (e.g., the location of the "Spin" button) that the app will then target. The app will then perform a click at that exact coordinate, relative to the target browser window.
+
+Automated Spin Counting: The app will automatically increment the spin count for each automated click it performs, ensuring perfect tracking and synchronization between the app's actions and its internal state.
+
+Screen Overlay & Movement Detector:
+
+A computer vision-based module using opencv-python that can detect changes on the screen. The user will be able to define a specific area of interest (e.g., the spin button, a win pop-up, a "play again" button).
+
+The logic will continuously monitor this defined area. When a significant change is detected (e.g., the spin button disappears after a click, or a pop-up appears), it can trigger a new action or pause the automation. This will also include optional detection of free-spins banners.
+
+Anti-idle Waggle Logic: This is a crucial module for avoiding detection.
+
+Randomized Delays: Instead of clicking every X milliseconds, the app will introduce randomized, human-like delays between actions.
+
+Mouse Jitter: Mouse movements will not be perfectly linear. Instead, they will be slightly varied to imitate the natural tremor of a human hand.
+
+Timeout Avoidance: A feature that performs a random, non-intrusive action (like a gentle mouse jiggle) at configurable intervals to prevent the casino session from timing out. This ensures the offer can be completed without constant user intervention.
+
+Next Steps for AI:
+
+Develop the automation module for mouse control.
+
+Create the image/movement detection module using OpenCV.
+
+Integrate the anti-idle waggle logic into the automation module to simulate natural user behavior.
+
+4. AI-Driven Development & Iteration
+This project will be developed through a continuous feedback loop between the user and the AI. This project plan acts as the single source of truth, guiding each stage of the development.
+
+Project Plan as a Guide: The phases and deliverables outlined above will be used as a checklist. I will focus on one "Next Step for AI" at a time, generating the code and documentation required to fulfill that step.
+
+User Feedback & Iteration: After I provide the code for a phase's deliverables, you can test it and provide feedback in the chat. This feedback will be used to refine the code, fix bugs, or adjust the project plan. This allows for a flexible, iterative process where the final product is shaped by real-world use and feedback.
+
+Preventing Regression & Hallucination: By adhering strictly to this detailed plan, I can avoid introducing features not requested by the user and ensure all code remains focused on the core objectives. The project plan serves as a living "contract" for the development process.
+
+5. Version Control & Collaboration
+For the purpose of versioning and collaboration, all generated code for "Spin Helper" will be committed to a GitHub repository.
+
+Repository Structure: The repository will be structured to contain all Python source files, a requirements.txt file for dependencies, and a README.md that explains the project.
+
+Committing Changes: At the end of each development phase, I will produce a clear, concise code file that contains all of the new functionality. This will represent a stable, functional version of the application.
+
+Benefits: This approach provides a historical record of the codebase, allows for easy rollbacks to previous versions if needed, and facilitates future collaboration with other developers.
+
+6. Goals and Non-Goals
+These guidelines are crucial for ensuring the tool remains safe, ethical, and within its intended scope.
+
+Goals:
+
+Keep UI simple and deterministic.
+
+Embed the calculator (no separate dialogs).
+
+Provide clear logs suitable for later scripting/integration.
+
+Be a desktop assistant for low-friction casino wagering workflows.
+
+Non-goals / Safety:
+
+The app does not choose bets, scrape odds, or bypass game rules.
+
+The app does not place bets or decide strategy.
+
+All stake selection, offer mechanics, and bankroll choices remain with the user.
+
+This plan provides a clear, actionable roadmap. I am ready to begin with Phase 1, focusing on creating the core GUI framework and the initial environment interaction module.
