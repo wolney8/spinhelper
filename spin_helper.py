@@ -3,7 +3,7 @@
 # centralized spinner detection, current wager display, universal spin logic
 
 import os, sys, time, math, threading, queue, json, random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fieldw00n
 from typing import Optional, Tuple, List
 from enum import Enum
 
