@@ -32,6 +32,18 @@ Format follows **Keep a Changelog** and **Semantic Versioning**:
 
 ---
 
+## [1.17.4] — 2025-09-03
+Minor update to improve usability and address test feedback.
+
+### Added
+- **Focus click after Ready**: A small click 15–25px above the spinner runs once after Ready to bring the browser to front without triggering a spin. Applies to Counter, Automatic, and Slots.
+- **Clicker Automatic current wager**: Live “Current Wager” display in Automatic controls (before waggle). Computes clicks_done × bet/spin from the Clicker calculator and resets on Stop/Reset.
+
+### Fixed
+- **Slots run state corrected**: Slots now starts in RUNNING and resets pause flags on Ready, so mouse‑move auto‑pause works immediately and reliably.
+
+---
+
 ## [1.17.3] — 2025-09-03
 **CRITICAL HOTFIX** release fixing major functionality issues from v1.17.2.
 
@@ -67,6 +79,7 @@ Format follows **Keep a Changelog** and **Semantic Versioning**:
 - **Enhanced logging** - Clear mode prefixes (e.g., "Counter:", "Automatic:", "Slots:")
 - **Click detection boundaries** - 50px radius for Counter mode click detection
 - **Error handling** - Graceful fallbacks when pynput unavailable
+
 
 ### Breaking Changes
 - None - all existing functionality preserved with bug fixes only

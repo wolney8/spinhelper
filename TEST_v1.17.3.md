@@ -1,4 +1,4 @@
-## Spin Helper v1.17.2 - Test Results and Changes Required
+## Spin Helper v1.17.3 - Test Results and Changes Required
 
 
 # General:

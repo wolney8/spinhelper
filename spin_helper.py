@@ -1,4 +1,5 @@
-# spin_helper.py — v1.17.3 HOTFIX
+# spin_helper.py — v1.17.4
+from __future__ import annotations
 # FIXED: Counter mode click detection, cross-contamination, consistent button behavior
 # FIXED: Slots mouse positioning, proper state isolation between modes
 
@@ -44,7 +45,7 @@ except ImportError:
 
 # --------------- Constants ---------------
 
-APP_VERSION = "1.17.3"
+APP_VERSION = "1.17.4"
 UI_FLUSH_MS = 60
 
 # Spin detection thresholds
@@ -728,8 +729,10 @@ class SpinHelperApp(tk.Tk):
         self._restore_geometry()
         self._build_ui()
         self.after(UI_FLUSH_MS, self._drain_log)
+        # Start Clicker Automatic current wager updater
+        self.after(1000, self._update_clicker_current_wager)
         
-        self._log("Spin Helper v1.17.3 HOTFIX initialized", green=True)
+        self._log(f"Spin Helper v{APP_VERSION} initialized", green=True)
 
     # ---------- UI Building ----------
 
@@ -990,6 +993,14 @@ class SpinHelperApp(tk.Tk):
         self.auto_stop_btn = ttk.Button(auto_controls, text="Stop/Reset", command=self._auto_stop_reset)
         self.auto_stop_btn.grid(row=0, column=6)
         
+        # Current Wager (for Automatic) — shown before waggle controls
+        self.clicker_auto_wager_var = tk.StringVar(value="£0.00")
+        wager_frame = ttk.Frame(auto_frame)
+        wager_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(wager_frame, text="Current Wager:").pack(side=tk.LEFT)
+        ttk.Label(wager_frame, textvariable=self.clicker_auto_wager_var, font=('Monaco', 10, 'bold'),
+                 foreground="white").pack(side=tk.LEFT, padx=(6, 0))
+
         # Waggle controls
         self.waggle_on_var = tk.BooleanVar(value=AC_DEFAULT_WAGGLE_ON)
         self.waggle_secs_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_SECS)
@@ -1138,6 +1149,16 @@ class SpinHelperApp(tk.Tk):
                 pg.moveTo(x, y, duration=0.2)
                 self._log(f"{mode_name}: Mouse positioned at spinner ({x},{y})")
                 
+                # NEW: Focus click slightly above the spin button to bring browser to front
+                try:
+                    focus_x = x + random.randint(-6, 6)
+                    focus_y = y - random.randint(15, 25)
+                    pg.moveTo(focus_x, focus_y, duration=0.05)
+                    pg.click()
+                    self._log(f"{mode_name}: Focus click to bring browser to front")
+                except Exception:
+                    pass
+                
                 # Grace period
                 self._log(f"{mode_name}: Grace period ({GRACE_PERIOD_SECS}s)...")
                 time.sleep(GRACE_PERIOD_SECS)
@@ -1163,8 +1184,11 @@ class SpinHelperApp(tk.Tk):
             return
         
         self.slots_mode_active = True
-        self.state_slots.automation.mode = AutomationMode.READY
+        self.state_slots.automation.mode = AutomationMode.RUNNING
         self.state_slots.automation.stop_requested = False
+        # Reset pause flags to avoid sticky paused state from previous runs
+        self.state_slots.automation.paused_by_mouse = False
+        self.state_slots.automation.paused_manually = False
         
         # Update UI
         self.slots_ready_btn.config(state=tk.DISABLED, text="Running...")
@@ -1315,6 +1339,9 @@ class SpinHelperApp(tk.Tk):
         self.automatic_mode_active = True
         self.state_slots.automation.mode = AutomationMode.RUNNING
         self.state_slots.automation.stop_requested = False
+        # Reset pause flags to ensure clean start
+        self.state_slots.automation.paused_by_mouse = False
+        self.state_slots.automation.paused_manually = False
         
         # Update UI
         self.auto_ready_btn.config(state=tk.DISABLED, text="Running...")
@@ -1339,6 +1366,8 @@ class SpinHelperApp(tk.Tk):
         # Reset counters
         self.clicker_auto_target.set(0)
         self.clicker_auto_done.set(0)
+        if hasattr(self, 'clicker_auto_wager_var'):
+            self.clicker_auto_wager_var.set("£0.00")
         
         # Reset UI
         self.auto_ready_btn.config(state=tk.NORMAL, text="Ready")
@@ -1495,6 +1524,22 @@ class SpinHelperApp(tk.Tk):
             pass
         finally:
             self.after(UI_FLUSH_MS, self._drain_log)
+
+    # ---------- Clicker Automatic Current Wager Updater ----------
+    def _update_clicker_current_wager(self):
+        try:
+            # Uses Clicker calculator Bet/spin and Automatic Done count
+            bet = 0.0
+            if hasattr(self, 'clicker_calculator'):
+                bet = float(self.clicker_calculator.bet_var.get() or "0")
+            done = int(self.clicker_auto_done.get() if hasattr(self, 'clicker_auto_done') else 0)
+            current = done * bet
+            if hasattr(self, 'clicker_auto_wager_var'):
+                self.clicker_auto_wager_var.set(f"£{current:.2f}")
+        except Exception:
+            pass
+        finally:
+            self.after(1000, self._update_clicker_current_wager)
 
     def destroy(self):
         try:
