@@ -1,4 +1,4 @@
-# spin_helper.py — v1.17.5
+# spin_helper.py — v1.17.7
 from __future__ import annotations
 # FIXED: Counter mode click detection, cross-contamination, consistent button behavior
 # FIXED: Slots mouse positioning, proper state isolation between modes
@@ -45,7 +45,7 @@ except ImportError:
 
 # --------------- Constants ---------------
 
-APP_VERSION = "1.17.5"
+APP_VERSION = "1.17.7"
 UI_FLUSH_MS = 60
 
 # Spin detection thresholds
@@ -58,6 +58,15 @@ MAX_CONSECUTIVE_BLIPS = 3
 
 # Long-spin handling (avoid premature rescues on long wins/anticipation)
 LONG_SPIN_GRACE_SEC = 4.0
+
+# Pre-click readiness handling (Automatic/Slots): allow multiple grace clicks
+PRE_READY_INITIAL_WAIT = 4.0
+PRE_READY_GRACE_CLICKS = 3
+PRE_READY_WAIT_AFTER_CLICK = 10.0
+PRE_READY_MAX_TIMEOUT = 45.0
+
+# Free-Spins animation heuristics (optional; only if FS ROI is set)
+FS_ANIM_RMS_ACTIVE = 5.0  # average RMS threshold to consider area "active"
 
 # Mouse movement pause detection
 MOUSE_PAUSE_THRESHOLD = 80
@@ -144,6 +153,7 @@ class AutomationState:
     paused_manually: bool = False
     stop_requested: bool = False
     last_mouse_pos: Optional[Tuple[int,int]] = None
+    actual_clicks: int = 0
     
 @dataclass
 class SessionStateSlots:
@@ -209,6 +219,11 @@ class ClickDetector:
                             dt_ms = (now_t - self.last_click_ts) * 1000.0
                             self.app._log(f"Counter: ~{dt_ms:.0f} ms since last click")
                         self.last_click_ts = now_t
+                        # Increment Actual Clicks for Counter mode (guarded)
+                        try:
+                            self.app._inc_actual_clicks(x, y)
+                        except Exception:
+                            pass
                         current = self.app.clicker_manual_done.get()
                         target = self.app.clicker_manual_target.get()
                         if target == 0 or current < target:
@@ -648,6 +663,7 @@ class SpinDetector:
     def __init__(self, state: SessionStateSlots, log_func):
         self.state = state
         self.log = log_func
+        self.on_actual_click = None  # optional callback to increment app-visible counters
         
     def get_current_state(self) -> SpinState:
         if not PIL_AVAILABLE or not self.state.spinner.is_valid:
@@ -770,6 +786,11 @@ class SpinDetector:
             jy = y + random.randint(-JITTER_PX, JITTER_PX)
             pg.moveTo(jx, jy, duration=0.06)
             pg.click()
+            if self.on_actual_click:
+                try:
+                    self.on_actual_click()
+                except Exception:
+                    pass
             self.log("Rescue click #1")
             
             return self._wait_for_change(baseline, become_changed=False, timeout=wait_after_click)
@@ -786,6 +807,121 @@ class SpinDetector:
             
         return False
 
+    def _fs_area_active(self) -> bool:
+        """Heuristic: sample FS ROI quickly to estimate if area is animating.
+
+        Requires: PIL available, fs_roi set, and detection enabled.
+        """
+        try:
+            if not PIL_AVAILABLE:
+                return False
+            if not getattr(self.state, 'fs_roi', None) or not getattr(self.state, 'detect_fs', False):
+                return False
+            roi = self.state.fs_roi
+            # Take a few rapid samples and compute average RMS change
+            samples = []
+            last = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
+            for _ in range(4):
+                time.sleep(0.08)
+                cur = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
+                samples.append(_rms(cur, last))
+                last = cur
+            avg = sum(samples) / max(1, len(samples))
+            return avg >= FS_ANIM_RMS_ACTIVE
+        except Exception:
+            return False
+
+    def _click_anywhere_to_continue(self) -> None:
+        """Click away from the spin button to advance overlays or prompts.
+
+        Chooses a point up/left from the spinner, jittered slightly, and clicks it.
+        Intentionally NOT near the spinner to avoid accidental spins.
+        """
+        try:
+            if not self.state.spinner.center_xy or not PYAUTOGUI_AVAILABLE:
+                return
+            sx, sy = self.state.spinner.center_xy
+            # Aim towards slot area: up and left from the spin button
+            dx = -random.randint(180, 260)
+            dy = -random.randint(140, 240)
+            tx, ty = sx + dx, sy + dy
+            # Keep within screen bounds if possible
+            try:
+                sw, sh = pg.size()
+                tx = clamp(tx, 10, sw - 10)
+                ty = clamp(ty, 10, sh - 10)
+            except Exception:
+                pass
+            pg.moveTo(tx, ty, duration=0.08)
+            pg.click()
+            # Note: on_actual_click provided coordinates; guard may decide not to count
+            if self.on_actual_click:
+                try:
+                    self.on_actual_click(tx, ty)
+                except Exception:
+                    pass
+            self.log("Overlay-progress click (away from spin)")
+        except Exception:
+            pass
+
+    def wait_while_fs_active(self, max_seconds: float = 180.0, check_interval: float = 0.5) -> None:
+        """Block while FS/animation area is active according to FS ROI heuristic."""
+        t0 = time.time()
+        try:
+            while (time.time() - t0) < max_seconds and not self.state.automation.stop_requested:
+                if not self._fs_area_active():
+                    return
+                time.sleep(check_interval)
+        except Exception:
+            pass
+
+    def ensure_ready_multigrace(self, baseline: Image.Image) -> bool:
+        """Wait for READY with multiple pre-click grace attempts.
+
+        Strategy:
+        1) Wait a short initial period for READY.
+        2) If not ready, perform up to N overlay-progress clicks away from the spin
+           button, each followed by a wait; after each, re-check READY.
+        3) If FS detection is available and area is active, bias towards waiting.
+        """
+        t0 = time.time()
+
+        # Initial wait
+        if self._wait_for_change(baseline, become_changed=False, timeout=PRE_READY_INITIAL_WAIT):
+            return True
+
+        clicks = 0
+        while (time.time() - t0) < PRE_READY_MAX_TIMEOUT and clicks < PRE_READY_GRACE_CLICKS:
+            if self.state.automation.stop_requested:
+                return False
+
+            # If FS area appears active, wait briefly before attempting a grace click
+            if self._fs_area_active():
+                self.log("Pre-click: FS area active; waiting before grace click")
+                time.sleep(0.4)
+                # quick re-check for ready without clicking
+                if self._wait_for_change(baseline, become_changed=False, timeout=0.5):
+                    return True
+
+            # Perform an away-from-spin click to advance overlays/requests for input
+            self._click_anywhere_to_continue()
+
+            # Wait and check READY after the grace click
+            if self._wait_for_change(baseline, become_changed=False, timeout=PRE_READY_WAIT_AFTER_CLICK):
+                return True
+
+            # If FS area becomes active, wait until it calms down (free spins, big win, etc.)
+            if self._fs_area_active():
+                self.log("Pre-click: FS/animation active; waiting for completion")
+                self.wait_while_fs_active()
+                # After waiting, re-check READY quickly
+                if self._wait_for_change(baseline, become_changed=False, timeout=2.0):
+                    return True
+
+            clicks += 1
+
+        return False
+
     def do_click(self, with_jitter: bool = True) -> bool:
         if not self.state.spinner.center_xy:
             return False
@@ -800,6 +936,11 @@ class SpinDetector:
                 else:
                     pg.moveTo(x, y, duration=0.08)
                 pg.click()
+                if self.on_actual_click:
+                    try:
+                        self.on_actual_click()
+                    except Exception:
+                        pass
                 return True
             else:
                 time.sleep(0.05)
@@ -822,6 +963,7 @@ class SpinHelperApp(tk.Tk):
         
         # Enhanced components
         self.spin_detector = SpinDetector(self.state_slots, self._log)
+        self.spin_detector.on_actual_click = self._inc_actual_clicks
         self.mouse_monitor = MouseMonitor(self.state_slots, self._log)
         self.click_detector = ClickDetector(self)
         
@@ -838,6 +980,11 @@ class SpinHelperApp(tk.Tk):
         self.waggle_on_var = tk.BooleanVar(value=AC_DEFAULT_WAGGLE_ON)
         self.waggle_secs_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_SECS)
         self.waggle_amp_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_AMP)
+
+        # UI counters for Actual Clicks per mode
+        self.slots_actual_clicks_var = tk.StringVar(value="0")
+        self.clicker_manual_actual_clicks = tk.IntVar(value=0)
+        self.clicker_auto_actual_clicks = tk.IntVar(value=0)
 
         # Build UI and restore
         self._restore_geometry()
@@ -1011,6 +1158,13 @@ class SpinHelperApp(tk.Tk):
         self.slots_counter_var = tk.StringVar(value="0")
         ttk.Label(counter_frame, textvariable=self.slots_counter_var, font=('Monaco', 12, 'bold'), 
                  foreground="white").pack(side=tk.LEFT, padx=(10, 0))
+
+        # Actual clicks display (counts spin + rescue + grace clicks)
+        actual_frame = ttk.Frame(auto_frame)
+        actual_frame.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(actual_frame, text="Actual Clicks:").pack(side=tk.LEFT)
+        ttk.Label(actual_frame, textvariable=self.slots_actual_clicks_var, font=('Monaco', 10, 'bold'),
+                 foreground="white").pack(side=tk.LEFT, padx=(10, 0))
         
         # Anti-idle waggle controls for Slots (shared settings with Clicker)
         waggle_frame_slots = ttk.Frame(auto_frame)
@@ -1082,7 +1236,7 @@ class SpinHelperApp(tk.Tk):
         ttk.Label(counter_controls, text="Target:").grid(row=0, column=0, sticky="w")
         ttk.Entry(counter_controls, textvariable=self.clicker_manual_target, width=8).grid(row=0, column=1, padx=(5, 15))
         
-        ttk.Label(counter_controls, text="Done:").grid(row=0, column=2, sticky="w")
+        ttk.Label(counter_controls, text="Spins Completed:").grid(row=0, column=2, sticky="w")
         ttk.Label(counter_controls, textvariable=self.clicker_manual_done, font=('Monaco', 10, 'bold'),
                  foreground="white").grid(row=0, column=3, padx=(5, 15))
         
@@ -1095,6 +1249,11 @@ class SpinHelperApp(tk.Tk):
         
         self.counter_stop_btn = ttk.Button(counter_controls, text="Stop/Reset", command=self._counter_stop_reset)
         self.counter_stop_btn.grid(row=0, column=6)
+
+        # Actual clicks under Spins Completed
+        ttk.Label(counter_controls, text="Actual Clicks:").grid(row=1, column=2, sticky="w", pady=(4,0))
+        ttk.Label(counter_controls, textvariable=self.clicker_manual_actual_clicks, font=('Monaco', 10, 'bold'),
+                 foreground="white").grid(row=1, column=3, padx=(5, 15), pady=(4,0))
         
         # Automatic mode
         auto_tab = ttk.Frame(self.clicker_notebook)
@@ -1112,7 +1271,7 @@ class SpinHelperApp(tk.Tk):
         ttk.Label(auto_controls, text="Target:").grid(row=0, column=0, sticky="w")
         ttk.Entry(auto_controls, textvariable=self.clicker_auto_target, width=8).grid(row=0, column=1, padx=(5, 15))
         
-        ttk.Label(auto_controls, text="Done:").grid(row=0, column=2, sticky="w")
+        ttk.Label(auto_controls, text="Spins Completed:").grid(row=0, column=2, sticky="w")
         ttk.Label(auto_controls, textvariable=self.clicker_auto_done, font=('Monaco', 10, 'bold'),
                  foreground="white").grid(row=0, column=3, padx=(5, 15))
         
@@ -1125,6 +1284,11 @@ class SpinHelperApp(tk.Tk):
         
         self.auto_stop_btn = ttk.Button(auto_controls, text="Stop/Reset", command=self._auto_stop_reset)
         self.auto_stop_btn.grid(row=0, column=6)
+
+        # Actual clicks under Spins Completed
+        ttk.Label(auto_controls, text="Actual Clicks:").grid(row=1, column=2, sticky="w", pady=(4,0))
+        ttk.Label(auto_controls, textvariable=self.clicker_auto_actual_clicks, font=('Monaco', 10, 'bold'),
+                 foreground="white").grid(row=1, column=3, padx=(5, 15), pady=(4,0))
         
         # Current Wager (for Automatic) — shown before waggle controls
         self.clicker_auto_wager_var = tk.StringVar(value="£0.00")
@@ -1325,6 +1489,9 @@ class SpinHelperApp(tk.Tk):
         # Reset pause flags to avoid sticky paused state from previous runs
         self.state_slots.automation.paused_by_mouse = False
         self.state_slots.automation.paused_manually = False
+        # Reset Actual Clicks counter
+        self.state_slots.automation.actual_clicks = 0
+        self.slots_actual_clicks_var.set("0")
         
         # Update UI
         self.slots_ready_btn.config(state=tk.DISABLED, text="Running...")
@@ -1349,7 +1516,9 @@ class SpinHelperApp(tk.Tk):
         # Reset counters but NOT calculator
         self.state_slots.automation.total_done = 0
         self.state_slots.automation.target_count = 0
+        self.state_slots.automation.actual_clicks = 0
         self.slots_counter_var.set("0")
+        self.slots_actual_clicks_var.set("0")
         
         # Reset UI
         self.slots_ready_btn.config(state=tk.NORMAL, text="Ready")
@@ -1380,8 +1549,8 @@ class SpinHelperApp(tk.Tk):
                 spin_num = self.state_slots.automation.total_done + 1
                 self._log(f"Slots: Executing spin #{spin_num}")
                 
-                # Execute spin with robust detection
-                if not self.spin_detector._ensure_ready_before_click(baseline):
+                # Execute spin with robust detection (multi-grace pre-click)
+                if not self.spin_detector.ensure_ready_multigrace(baseline):
                     self._log(f"Slots: Spin #{spin_num} - timeout waiting READY")
                     break
                 
@@ -1434,6 +1603,9 @@ class SpinHelperApp(tk.Tk):
             return
         
         self.counter_mode_active = True
+        # Reset Actual Clicks counter for Counter mode
+        self.state_slots.automation.actual_clicks = 0
+        self.clicker_manual_actual_clicks.set(0)
         
         # Update UI
         self.counter_ready_btn.config(state=tk.DISABLED, text="Detecting...")
@@ -1461,6 +1633,8 @@ class SpinHelperApp(tk.Tk):
         # Reset counters
         self.clicker_manual_target.set(0)
         self.clicker_manual_done.set(0)
+        self.state_slots.automation.actual_clicks = 0
+        self.clicker_manual_actual_clicks.set(0)
         
         # Reset UI
         self.counter_ready_btn.config(state=tk.NORMAL, text="Ready")
@@ -1488,6 +1662,9 @@ class SpinHelperApp(tk.Tk):
         # Reset pause flags to ensure clean start
         self.state_slots.automation.paused_by_mouse = False
         self.state_slots.automation.paused_manually = False
+        # Reset Actual Clicks counter for Automatic mode
+        self.state_slots.automation.actual_clicks = 0
+        self.clicker_auto_actual_clicks.set(0)
         
         # Update UI
         self.auto_ready_btn.config(state=tk.DISABLED, text="Running...")
@@ -1514,6 +1691,8 @@ class SpinHelperApp(tk.Tk):
         self.clicker_auto_done.set(0)
         if hasattr(self, 'clicker_auto_wager_var'):
             self.clicker_auto_wager_var.set("£0.00")
+        self.state_slots.automation.actual_clicks = 0
+        self.clicker_auto_actual_clicks.set(0)
         
         # Reset UI
         self.auto_ready_btn.config(state=tk.NORMAL, text="Ready")
@@ -1541,7 +1720,7 @@ class SpinHelperApp(tk.Tk):
                 done += 1
                 self._log(f"Automatic: Executing click #{done}/{target}")
                 
-                if not self.spin_detector._ensure_ready_before_click(baseline):
+                if not self.spin_detector.ensure_ready_multigrace(baseline):
                     self._log(f"Automatic: Click #{done} - timeout waiting READY")
                     break
                 
@@ -1672,6 +1851,59 @@ class SpinHelperApp(tk.Tk):
             pass
         finally:
             self.after(UI_FLUSH_MS, self._drain_log)
+
+    # ---------- Actual Clicks Counter Updater ----------
+    def _inc_actual_clicks(self, x: Optional[int]=None, y: Optional[int]=None):
+        try:
+            if not self._counting_allowed(x, y):
+                return
+            self.state_slots.automation.actual_clicks += 1
+            if self.slots_mode_active:
+                self.slots_actual_clicks_var.set(str(self.state_slots.automation.actual_clicks))
+            elif self.automatic_mode_active:
+                self.clicker_auto_actual_clicks.set(self.state_slots.automation.actual_clicks)
+            elif self.counter_mode_active:
+                self.clicker_manual_actual_clicks.set(self.state_slots.automation.actual_clicks)
+        except Exception:
+            pass
+
+    def _counting_allowed(self, x: Optional[int]=None, y: Optional[int]=None) -> bool:
+        try:
+            # Spinner must be captured
+            sp = self.state_slots.spinner
+            if not sp or not sp.is_valid or not sp.center_xy:
+                return False
+            # Ready must be engaged in one of the modes
+            ready_any = self.counter_mode_active or self.automatic_mode_active or self.slots_mode_active
+            if not ready_any:
+                return False
+            # If automation paused due to mouse movement, do not count
+            if getattr(self.state_slots.automation, 'paused_by_mouse', False):
+                return False
+            # Verify mouse is near/within spinner region
+            mx, my = (None, None)
+            if x is not None and y is not None:
+                mx, my = x, y
+            elif PYAUTOGUI_AVAILABLE:
+                try:
+                    mx, my = pg.position()
+                except Exception:
+                    mx, my = None, None
+            # If we cannot read mouse, be conservative and do not count
+            if mx is None or my is None:
+                return False
+            # Prefer ROI containment, else distance from center
+            if sp.roi:
+                if not (sp.roi.x <= mx <= sp.roi.x + sp.roi.w and sp.roi.y <= my <= sp.roi.y + sp.roi.h):
+                    return False
+            else:
+                sx, sy = sp.center_xy
+                distance = math.sqrt((mx - sx)**2 + (my - sy)**2)
+                if distance > MOUSE_PAUSE_THRESHOLD:
+                    return False
+            return True
+        except Exception:
+            return False
 
     # ---------- Clicker Automatic Current Wager Updater ----------
     def _update_clicker_current_wager(self):

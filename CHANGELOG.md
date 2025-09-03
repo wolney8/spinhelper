@@ -45,6 +45,7 @@ Follow-up release addressing v1.17.4 test feedback and UX.
 
 ### Changed
 - Long-spin grace: both Slots and Automatic wait for READY with a grace window before attempting a rescue, with a single optional grace click if overlays suspected.
+- Automatic pre-click readiness: extended timeout and multiple pre-click grace attempts; checks READY after each attempt to detect effect and reduce false timeouts.
 
 ### Fixed
 - Consistent ms logging across features and shared anti-idle settings across Slots and Clicker.
@@ -306,3 +307,32 @@ READY → (click) → NOT_READY → (spin complete) → READY
 ~/.spin_helper_geometry.json - Window geometry and topmost state
 /tmp/spin_helper_roi_selection.png - Temporary FS ROI selection (macOS)
 ```
+## [1.17.6] — 2025-09-03
+UI consistency and click telemetry improvements.
+
+### Added
+- Actual Clicks counter in Slots and Clicker (Counter and Automatic). Counts all clicks after Ready, including spin, grace, and rescue clicks (or manual clicks in Counter).
+
+### Changed
+- Consistent naming: "Spins Completed" replaces "Done" in Clicker (Counter and Automatic) labels.
+
+### Notes
+- Version incremented in both script and changelog.
+- Actual Clicks guarded: only increments when spinner is captured, a Ready state is active for a feature, and the mouse pointer is within the spinner area (ROI or within proximity). Also respects mouse-move auto-pause.
+
+---
+## [1.17.7] — 2025-09-03
+Improved overlay handling and pre-click resilience for Slots/Automatic.
+
+### Added
+- Pre-click overlay progression: performs up to 3 away-from-spin clicks (with waits and READY rechecks) when the button doesn’t become READY quickly.
+- FS animation gating: when a user-selected FS/slots ROI appears active, the app waits for animations/free-spins to complete instead of timing out.
+
+### Changed
+- Slots and Automatic use multi-grace readiness with longer waits before giving up.
+- Overlay progression clicks are targeted away from the spin button to avoid accidental spins.
+
+### Notes
+- Uses the existing Free-Spins Detection ROI as a generic “slots activity” detector. If not set, logic still functions with best-effort heuristics.
+
+---
