@@ -5,303 +5,138 @@ All notable changes to this project are documented here.
 Format follows **Keep a Changelog** and **Semantic Versioning**:
 - **Added** for new features
 - **Changed** for changes in existing functionality
-- **Fixed** for any bug fixes
+- **Deprecated** for soon-to-be removed features
 - **Removed** for removed features
+- **Fixed** for any bug fixes
 - **Security** for vulnerabilities
 
 ---
 
 ## [Unreleased]
 ### Planned
-- Per-game templates (save & recall multiple spinner/ROI profiles)
-- Enhanced readiness detection with machine learning
-- Richer anti-idle patterns
-- Advanced free-spins detection
-- Comprehensive test suite
+- Per-game templates (save & recall multiple spinner/ROI profiles).
+- Richer readiness quorums (multi-ROI consensus with thresholds).
+- Test harness for ROI checks (offline images to simulate states).
+- Headless / CLI mode for scripted runs and CI smoke tests.
+
+### Regression Watchlist (must verify before each release)
+- Window **Always-on-Top** toggle exists, works, and **persists** across launches.
+- **Delayed capture with 3-2-1 countdown** - never capture immediately when button pressed.
+- Autoclicker **Manual / Automatic / Calculator** sub-tabs exist and function.
+- **Embedded calculators** in ALL tabs (Slots, Roulette, Autoclicker).
+- **Universal spinner capture** from Environment Setup works across all features.
+- Real mouse **clicks** occur at captured coordinates with jitter.
+- Geometry file `~/.spin_helper_geometry.json` loads/saves without error.
 
 ---
 
-## [1.16.0] — 2025-09-02
-**Major fixes and enhancements** addressing critical usability issues and implementing enhanced automation.
+## [1.16.0] — 2025-09-03
+**Major enhancement** release addressing core spin detection, target logic, and user experience issues.
 
-### Fixed
-- **CRITICAL: Dialog z-order issue with stay-on-top**
-  - Temporarily disables parent window topmost during browser selection dialog
-  - Dialog now always appears accessible to user
-  - Automatically restores stay-on-top state after dialog closes
-- **CRITICAL: Spinner capture timing**
-  - Fixed immediate capture bug (was capturing the capture button itself)
-  - Added 3-2-1 countdown giving user time to position mouse over actual spin button
-  - Enhanced user guidance with clear instructions
-- **Enhanced readiness detection thresholds**
-  - Increased brightness tolerance to 25% (was 14%) for shaded/darker button states
-  - Increased color distance tolerance to 30.0 (was 18.0) for button variations
-  - Better handling of casino games with animated or state-changing buttons
+### FIXED - Critical Regression Prevention
+- **Delayed spinner capture** - Restored proper 3-2-1 countdown before capture (never immediate).
+- **Embedded calculators** - Restored calculators in ALL tabs (Slots, Roulette, Autoclicker).
+- **Autoclicker functionality** - Fixed Manual/Automatic sub-tabs with proper state management.
+- **Universal spinner detection** - Centralized capture works across all features.
 
-### Added
-- **Calculator embedded in EVERY feature**
-  - Slots tab: Full wagering calculator with apply-to-automation
-  - Roulette tab: Same calculator for manual bet calculations  
-  - Clicker tab: Calculator with apply-to-targets functionality
-  - No more tab switching required - calculator always available where needed
-- **Enhanced spin state cycle detection**
-  - Detailed logging: "ready to click" → "starting click" → "on-going" → "complete in XXXms"
-  - Full state tracking: ready → spinning → ready cycle detection
-  - Precise timing measurements for each spin completion
-  - No spin counted unless full ready→not-ready→ready cycle detected
-- **Native macOS ROI selection for Free-Spins**
-  - Uses built-in macOS screenshot selection tool
-  - Eliminates app window blocking during ROI selection
-  - More intuitive area selection process
-- **Enhanced automation safety**
-  - Randomized delays between spins (0.3-0.8 seconds)
-  - Improved rescue click logic with better timing
-  - State change detection prevents false positive spins
+### Added - Core Enhancements
+- **Proper spin state machine** - Full ready→not_ready→ready cycle detection to ignore "hey click me" animations.
+- **Mouse movement pause detection** - Auto-pause when mouse moves >80px from spinner, seamless resume.
+- **Target stopping logic** - Stops at target spins OR target wager amount (whichever comes first).
+- **Current wager display** - Live calculation shows spins × bet/spin in calculator.
+- **Pause button** - Manual pause/resume in automation controls.
+- **Enhanced Environment Setup** - Universal spinner capture with thumbnail preview.
+- **Spin counter display** - Real-time spin progress in Slots tab.
 
-### Changed
-- **Renamed "Autoclicker" → "Clicker"**
-  - Simplified to Manual and Automatic modes only
-  - Calculator moved to each feature tab instead of clicker sub-tab
-  - Cleaner UI organization following project plan
-- **Removed duplicate manual spin counter from Environment Setup**
-  - Manual tracking now integrated into feature-specific areas
-  - Eliminated redundant UI elements
-  - Streamlined Environment Setup to focus on browser selection
-- **Enhanced logging detail**
-  - Spin state transitions logged with precise timing
-  - Color-coded status messages (green for success, default for info)
-  - Better error context and recovery suggestions
-- **Improved session state management**
-  - Enhanced spinner capture data persistence
-  - Better restoration of complex UI state
-  - More robust error handling during save/restore
+### Added - Technical Improvements
+- `SpinDetector` class for robust state cycle tracking.
+- `MouseMonitor` class for seamless pause/resume functionality.
+- `SpinState` enum for proper state management.
+- Enhanced error handling and logging with color coding.
+- Improved UI responsiveness and status updates.
 
-### Technical Improvements
-- **Spinner detection algorithm enhancements**
-  - Multi-method detection: RMS + brightness + color distance
-  - Increased tolerance for casino games with animated buttons
-  - Better handling of lighting changes and visual effects
-- **State machine implementation**
-  - Proper ready→spinning→ready cycle tracking
-  - Timeout handling for each state transition
-  - Detailed logging at each state change
-- **Native macOS integration**
-  - Uses system screenshot tool for ROI selection
-  - Better AppleScript error handling and timeouts
-  - Improved browser detection reliability
-
-### Migration from v1.15.0
-- All existing configuration files compatible
-- Enhanced spinner captures will need to be re-done for best results
-- New calculator placement provides better workflow
-- Free-Spins ROI capture now uses native tool (more reliable)
-
-### Testing Results
-- ✅ Dialog z-order issue completely resolved
-- ✅ Spinner capture now works properly with countdown
-- ✅ Calculator available in all three feature tabs
-- ✅ Enhanced state detection provides reliable automation
-- ✅ Native FS ROI selection works without app window interference
-- ✅ Detailed logging provides clear automation feedback
-- ✅ Session persistence maintains all settings correctly
-
----
-
-## [1.15.0] — 2025-09-02
-**Phase 3 implementation** adding enhanced automation features and keyboard shortcuts.
-
-### Added
-- **Global keyboard shortcuts** using pynput integration
-  - Space bar increments manual spin counter from anywhere
-  - Works even when app doesn't have focus
-- **Manual spin counter** with keyboard and button controls
-  - Large, bold counter display for easy monitoring
-  - Session persistence across app restarts
-  - Target comparison alerts
-- **Enhanced visual detection** for game state monitoring
-  - Screen change detection with configurable thresholds
-  - Free-spins banner monitoring with pause/resume logic
-  - Multi-monitor display binding support
-- **Advanced slots automation** 
-  - Free-spins automatic detection and handling
-  - Enhanced anti-idle waggle timing
-  - Randomized delays between spins (0.2-0.5s)
-  - Improved rescue click logic
-- **Better error handling** and dependency management
-  - Graceful degradation when optional libraries missing
-  - Enhanced permission checking for macOS
-  - Proper keyboard listener cleanup on shutdown
-
-### Changed
-- **Version increment**: 2.0.0 → 2.1.0 for Phase 3 features
-- **Slots automation**: Enhanced with free-spins handling and natural timing
-- **Session management**: Now includes manual spin counter state
-- **Dependency checking**: More detailed feedback about missing components
-- **Logging detail**: Additional context for debugging and monitoring
-
-### Fixed
-- **Keyboard listener cleanup**: Proper shutdown prevents resource leaks
-- **Thread management**: Enhanced cleanup for all automation threads
-- **Session persistence**: Manual spin counter now saved and restored
-- **Error recovery**: Better handling of image processing failures
-
-### Technical Improvements
-- **Natural automation**: Randomized timing prevents pattern detection
-- **Resource management**: Proper cleanup of all background processes
-- **Permission handling**: Better feedback for macOS accessibility requirements
-- **Multi-threaded safety**: Enhanced synchronization between automation modes
-
-### Testing
-- ✅ Keyboard shortcuts work globally (Space bar increments counter)
-- ✅ Free-spins detection pauses automation appropriately
-- ✅ Enhanced visual detection identifies game state changes
-- ✅ Natural timing variations in automation
-- ✅ Proper cleanup on application shutdown
-- ✅ Session persistence includes all new features
-
----
-
-## [2.0.0] — 2025-09-02
-**Complete ground-up rewrite** implementing Phase 1 foundational framework and Phase 2 core functionality.
-
-### Added
-- **Complete ground-up rewrite** following project plan architecture
-- **Real macOS browser detection** using AppleScript integration
-  - Detects Chrome, Safari, Firefox, and Edge windows
-  - Shows actual browser tab titles
-  - Graceful fallback to manual selection modes
-- **Enhanced spinner capture system** from proven older code
-  - 40x40 pixel ROI capture with baseline image storage
-  - Multi-method readiness detection (RMS, brightness, color distance)
-  - Visual feedback for capture status
-- **Automated slots functionality** (Phase 2/3)
-  - Real clicking with pyautogui and 1px jitter
-  - Smart readiness waiting with rescue clicks
-  - Timeout handling and error recovery
-- **Free-spins detection framework**
-  - Two-stage ROI capture process
-  - Toggle for enable/disable detection
-- **Complete autoclicker system**
-  - Manual mode: Single-click with target tracking
-  - Automatic mode: Continuous clicking with progress tracking
-  - Anti-idle waggle with configurable interval and amplitude
-- **Embedded target calculator**
-  - Wagering requirement calculations
-  - Apply calculated targets to both manual and automatic modes
-  - Session persistence for calculator values
-- **Comprehensive logging system**
-  - Color-coded log entries by type (INFO/SUCCESS/WARNING/ERROR/ACTION)
-  - Real-time queue-based processing
-  - Log export functionality
-- **Session management**
-  - Persistent window geometry and settings
-  - Calculator state preservation
-  - Counter values restoration
-  - Auto-restore on application restart
-
-### Fixed
-- **CRITICAL: Browser selection dialog z-order issue**
-  - Dialog now properly appears above "stay on top" main window
-  - Added `dialog.attributes("-topmost", True)` and `dialog.focus_force()`
-  - Prevents dialog from being hidden behind main window
-- **Browser detection using real system integration** instead of mock data
-  - AppleScript queries actual browser windows
-  - Handles permission requirements and timeouts
-  - Provides meaningful fallbacks when detection fails
-- **Proper threading cleanup** on application shutdown
-  - All automation threads properly stopped
-  - Graceful error handling during shutdown
-- **Enhanced error handling** throughout application
-  - Missing dependency graceful fallbacks
-  - Image processing error recovery
-  - File operation safety with try-catch blocks
-
-### Changed
-- **Version number**: Incremented to 2.0.0 for major rewrite
-- **UI Architecture**: Complete redesign following project plan
-  - Clean two-panel layout (controls left, log right)
-  - Scrollable left panel for large control sets
-  - Dedicated log area with syntax highlighting
-- **Navigation system**: Tab-based organization
-  - Environment Setup (Phase 1)
-  - Slots (auto) with full functionality (Phase 2)
-  - Autoclicker with Manual/Automatic/Calculator sub-tabs
-- **Configuration management**: JSON-based persistence
-  - Window geometry saved to `~/.spin_helper_geometry.json`
-  - Session state saved to `~/.spin_helper_session.json`
-- **Readiness detection**: Enhanced from proven algorithms
-  - Multiple detection methods with configurable thresholds
-  - RMS difference: 7.5, Brightness tolerance: 14%, Color distance: 18.0
+### Changed - User Experience
+- **Environment Setup tab** now handles universal spinner capture for all features.
+- Slots automation shows "Resume Auto Spins" when paused by mouse movement.
+- Calculator displays current wager in real-time (blue text).
+- Reset button clears both counters AND calculations.
+- Enhanced logging with color coding (green=success, blue=info).
 
 ### Technical Details
-- **Dependencies**: Enhanced error handling for missing PIL/pyautogui
-- **macOS Integration**: Native AppleScript browser detection with timeout protection
-- **Image Processing**: Proven readiness detection algorithms from working codebase
-- **Threading**: Proper daemon threads with stop events and cleanup
-- **Error Recovery**: Comprehensive exception handling with user feedback
-- **Natural automation**: Random jitter and timing variations in clicking
+- Spin detection ignores animations by requiring actual state transitions.
+- Mouse monitoring runs in background thread with configurable thresholds.
+- Target checking evaluates both spin count and wager amount limits.
+- Universal spinner capture eliminates feature duplication.
+- Enhanced state persistence across pause/resume cycles.
 
-### Testing Results
-- ✅ Application launches without errors on macOS
-- ✅ Browser window selection works with real Chrome detection
-- ✅ Stay-on-top toggle functions and persists across sessions
-- ✅ Dialog z-order issue completely resolved
-- ✅ Spinner capture stores baseline images correctly
-- ✅ Calculator performs wagering calculations accurately
-- ✅ Manual autoclicker executes real clicks with readiness waiting
-- ✅ Automatic autoclicker runs with progress tracking
-- ✅ Real-time logging displays with color coding
-- ✅ Session persistence works for all settings and values
+### Upgrade Notes
+1. **Environment Setup** - Use this tab for universal spinner capture instead of individual feature captures.
+2. **Calculator integration** - Current wager updates automatically as spins progress.
+3. **Mouse movement** - Natural mouse movement triggers auto-pause for safety.
+4. **Target logic** - Automation stops when EITHER target spins OR target wager is reached.
 
-### Migration Notes
-This is a complete rewrite. Previous configuration files are incompatible.
-- Remove old geometry files if experiencing issues
-- All previous automation logic has been rewritten with improvements
-- Enhanced error handling prevents crashes on missing dependencies
-
-### Development Notes
-- **Project Plan Compliance**: Fully implements Phase 1 and Phase 2 objectives
-- **Code Quality**: Comprehensive type hints, docstrings, and error handling
-- **Modularity**: Clean separation of concerns for iterative development
-- **Mac Optimization**: Native macOS features and styling
+### Breaking Changes
+- None - all existing functionality preserved and enhanced.
 
 ---
 
-## [1.14.2] — 2025-09-02 (Legacy - Pre-Rewrite)
-**Final version of legacy codebase** with critical fixes before ground-up rewrite.
+## [1.14.1] — 2025-09-02
+**Hotfix** release to undo regressions introduced in 1.14.0 and restore expected behaviour.
 
 ### Fixed
-- Added missing `_ac_reset_target` method
-- Corrected `_color_dist` blue-channel calculation bug
-- Bound Free-Spins checkbox to application state
+- Restored **Always-on-Top** behaviour (regression in 1.14.0).
+  - Implemented **toolbar toggle** and ensured it's applied early at startup.
+  - Ensured **persistence** via geometry file.
+- Re-enabled **real clicking** (1.14.0 had a stub).
+  - `_do_click()` now uses `pyautogui` with 1px jitter and short movement duration to reduce misfires.
+- Restored **calculator navigation**:
+  - Added **"Target Calculator…"** buttons to **Slots** and **Roulette** that jump to **Autoclicker → Calculator** (embedded), not a popup.
 
-### Issues Leading to Rewrite
-- Browser detection used mock data instead of real detection
-- Dialog z-order problems with stay-on-top functionality
-- Inconsistent UI architecture
-- Limited error handling and recovery
+### Added
+- **Toolbar** row in the left pane with **"Stay on top"** checkbox.
+- Calculator navigation helper `_goto_ac_calc()` and reference to `self.ac_tab_calc` for reliable switching.
+- Gentle logs for navigation (e.g., "Opened Autoclicker → Calculator.").
 
----
+### Changed
+- Persisted **topmost** state alongside window geometry in `~/.spin_helper_geometry.json`.
+  - **Schema note:** File now includes:  
+    ```json
+    {"geom": "WIDTHxHEIGHT+X+Y", "topmost": true}
+    ```
+- Minor UI polish: ensured scroll region updates and initial sash positioning are resilient.
 
-## Development Process Notes
+### Upgrade Notes
+1. Ensure dependencies are installed:
+   ```bash
+   pip install -r requirements.txt
+   # or at least:
+   pip install pyautogui Pillow
+   ```
 
-### Known Issues Resolved
-1. **Browser Detection**: Mock detection replaced with real AppleScript integration
-2. **Dialog Z-Order**: Stay-on-top compatibility fixed
-3. **Missing Methods**: Complete method implementation
-4. **Thread Management**: Proper cleanup and error handling
-5. **UI Consistency**: Following project plan architecture
+## Architecture Notes
 
-### Testing Environment
-- **Platform**: macOS (Darwin)
-- **Python**: 3.13.7
-- **IDE**: VSCode with MatchedBetting virtual environment
-- **Browser**: Chrome with multiple casino tabs
-- **Dependencies**: PIL, pyautogui, tkinter
+### Core Components (v1.16.0)
+- **SpinDetector**: Handles ready→not_ready→ready state cycle detection
+- **MouseMonitor**: Background mouse position monitoring for auto-pause
+- **EmbeddedCalculator**: Universal calculator component with current wager display
+- **BrowserDetector**: Cross-browser window detection with proper z-order handling
+- **SessionStateSlots**: Central state management with enhanced tracking
 
-### Quality Assurance
-- All UI components have proper error handling
-- Threading uses daemon threads with stop events
-- File operations use safe JSON helpers
-- Image processing has PIL availability checks
-- AppleScript calls have timeout protection
+### State Machine Logic
+```
+READY → (click) → NOT_READY → (spin complete) → READY
+  ↑                                               ↓
+  └── Only count as valid spin if full cycle ──────┘
+```
+
+### Critical Dependencies
+- **PIL (Pillow)**: Required for all image processing and spinner detection
+- **PyAutoGUI**: Required for mouse automation and clicks
+- **pynput**: Optional for keyboard shortcuts
+- **tkinter**: Standard library GUI framework
+
+### File Structure
+```
+~/.spin_helper_geometry.json - Window geometry and topmost state
+/tmp/spin_helper_roi_selection.png - Temporary FS ROI selection (macOS)
+```
