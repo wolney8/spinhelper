@@ -32,15 +32,40 @@ Format follows **Keep a Changelog** and **Semantic Versioning**:
 
 ---
 
+## [1.17.5] — 2025-09-03
+Follow-up release addressing v1.17.4 test feedback and UX.
+
+### Added
+- Calculator scenarios: support both
+  - Bonus + Total Target → Wager × (and Spins if Bet/spin provided)
+  - Bonus + Wager × → Total Target (and Spins if Bet/spin provided)
+- Millisecond timing logs: Slots and Automatic now log "completed in <ms>" for each spin; Counter logs ms since last click.
+- Slots UI visibility: shows Target Spins and Total Wagering near Automation Controls.
+- Anti-idle in Slots: shared waggle toggle + settings available and used during Slots automation.
+
+### Changed
+- Long-spin grace: both Slots and Automatic wait for READY with a grace window before attempting a rescue, with a single optional grace click if overlays suspected.
+
+### Fixed
+- Consistent ms logging across features and shared anti-idle settings across Slots and Clicker.
+
+---
+
 ## [1.17.4] — 2025-09-03
 Minor update to improve usability and address test feedback.
 
 ### Added
 - **Focus click after Ready**: A small click 15–25px above the spinner runs once after Ready to bring the browser to front without triggering a spin. Applies to Counter, Automatic, and Slots.
 - **Clicker Automatic current wager**: Live “Current Wager” display in Automatic controls (before waggle). Computes clicks_done × bet/spin from the Clicker calculator and resets on Stop/Reset.
+- **Calculator scenarios**: Embedded calculators now support two workflows:
+  - Scenario 1: Enter Bonus Amount and Total Wager Target to compute Wager × (and Target Spins if Bet/spin is provided).
+  - Scenario 2: Enter Bonus Amount and Wager × to compute Total Wager Target (and Target Spins if Bet/spin is provided).
 
 ### Fixed
 - **Slots run state corrected**: Slots now starts in RUNNING and resets pause flags on Ready, so mouse‑move auto‑pause works immediately and reliably.
+
+### Verified
+- Click/spin detection stability improvements validated during testing.
 
 ---
 

@@ -1,4 +1,4 @@
-# spin_helper.py — v1.17.4
+# spin_helper.py — v1.17.5
 from __future__ import annotations
 # FIXED: Counter mode click detection, cross-contamination, consistent button behavior
 # FIXED: Slots mouse positioning, proper state isolation between modes
@@ -45,7 +45,7 @@ except ImportError:
 
 # --------------- Constants ---------------
 
-APP_VERSION = "1.17.4"
+APP_VERSION = "1.17.5"
 UI_FLUSH_MS = 60
 
 # Spin detection thresholds
@@ -55,6 +55,9 @@ SPIN_CHANGE_TIMEOUT = 25.0
 CHANGE_STICK_MS = 180
 MIN_VALID_SPIN_MS = 2000
 MAX_CONSECUTIVE_BLIPS = 3
+
+# Long-spin handling (avoid premature rescues on long wins/anticipation)
+LONG_SPIN_GRACE_SEC = 4.0
 
 # Mouse movement pause detection
 MOUSE_PAUSE_THRESHOLD = 80
@@ -168,6 +171,7 @@ class ClickDetector:
         self.app = app_instance
         self.monitoring = False
         self.mouse_listener = None
+        self.last_click_ts: Optional[float] = None
         
     def start_monitoring(self):
         if self.monitoring or not PYNPUT_AVAILABLE:
@@ -199,6 +203,12 @@ class ClickDetector:
                     sx, sy = self.app.state_slots.spinner.center_xy
                     distance = math.sqrt((x - sx)**2 + (y - sy)**2)
                     if distance <= 50:  # Click within 50px of spinner
+                        # Log interval between clicks as an approximation of spin duration
+                        now_t = time.time()
+                        if self.last_click_ts is not None:
+                            dt_ms = (now_t - self.last_click_ts) * 1000.0
+                            self.app._log(f"Counter: ~{dt_ms:.0f} ms since last click")
+                        self.last_click_ts = now_t
                         current = self.app.clicker_manual_done.get()
                         target = self.app.clicker_manual_target.get()
                         if target == 0 or current < target:
@@ -466,6 +476,8 @@ class EmbeddedCalculator:
         self.amount_var = tk.StringVar()
         self.mult_var = tk.StringVar()
         self.bet_var = tk.StringVar()
+        # Optional direct input for Scenario 1: Total Wager Target
+        self.total_target_input_var = tk.StringVar()
         self.total_var = tk.StringVar(value="—")
         self.target_var = tk.StringVar(value="—")
         self.current_wager_var = tk.StringVar(value="£0.00")
@@ -488,6 +500,12 @@ class EmbeddedCalculator:
         
         ttk.Label(input_frame, text="Bet/spin (£):").grid(row=0, column=4, sticky="w", padx=(0, 5))
         ttk.Entry(input_frame, textvariable=self.bet_var, width=8).grid(row=0, column=5)
+
+        # Optional total target input for Scenario 1
+        ttk.Label(input_frame, text="Total Target (£, optional):").grid(row=1, column=0, sticky="w", padx=(0, 5), pady=(6,0))
+        ttk.Entry(input_frame, textvariable=self.total_target_input_var, width=10).grid(row=1, column=1, padx=(0, 10), pady=(6,0))
+        ttk.Label(input_frame, text="Tip: Fill Total to compute Wager ×; or leave Total blank to compute Total from Wager ×.")\
+            .grid(row=1, column=2, columnspan=4, sticky="w", pady=(6,0))
         
         # Results row
         result_frame = ttk.Frame(self.frame)
@@ -524,24 +542,69 @@ class EmbeddedCalculator:
     
     def _calculate(self):
         try:
-            amount = float(self.amount_var.get().strip() or "0")
-            mult = float(self.mult_var.get().strip() or "0")
-            bet = float(self.bet_var.get().strip() or "0")
-            
-            if amount <= 0 or mult <= 0 or bet <= 0:
-                raise ValueError("All values must be greater than 0")
-            
-            total = amount * mult
-            target = int(round(total / bet))
-            
+            def parse_money(s: str) -> float:
+                s = (s or "").strip().replace("£", "").replace(",", "")
+                return float(s or "0")
+
+            amount = parse_money(self.amount_var.get())
+            mult_in = float((self.mult_var.get() or "0").strip() or "0")
+            bet = parse_money(self.bet_var.get())
+            total_in = parse_money(self.total_target_input_var.get())
+
+            if amount <= 0:
+                raise ValueError("Amount must be greater than 0")
+
+            used_scenario = None
+            # Scenario 1: Total provided -> derive Wager X
+            if total_in > 0:
+                total = total_in
+                mult = total / amount if amount > 0 else 0.0
+                self.mult_var.set(f"{mult:.2f}")
+                used_scenario = 1
+            else:
+                # Scenario 2: Wager X provided -> derive Total
+                if mult_in <= 0:
+                    raise ValueError("Provide either Wagering × or Total Target")
+                mult = mult_in
+                total = amount * mult
+                used_scenario = 2
+
+            # Spins are optional; only compute if bet > 0
+            if bet > 0:
+                target = int(round(total / bet))
+                self.target_var.set(str(target))
+            else:
+                self.target_var.set("—")
+
             self.total_var.set(f"£{total:.2f}")
-            self.target_var.set(str(target))
-            
-            self.app._log(f"{self.feature_name}: £{amount} × {mult} ÷ £{bet} = {target} spins", green=True)
+
+            # Log which formula was applied
+            if used_scenario == 1:
+                if bet > 0:
+                    self.app._log(
+                        f"{self.feature_name}: £{total:.2f} ÷ £{amount:.2f} = {mult:.2f}×; ÷ £{bet:.2f} = {self.target_var.get()} spins",
+                        green=True,
+                    )
+                else:
+                    self.app._log(
+                        f"{self.feature_name}: £{total:.2f} ÷ £{amount:.2f} = {mult:.2f}× (Wager ×)",
+                        green=True,
+                    )
+            else:
+                if bet > 0:
+                    self.app._log(
+                        f"{self.feature_name}: £{amount:.2f} × {mult:.2f} ÷ £{bet:.2f} = {self.target_var.get()} spins",
+                        green=True,
+                    )
+                else:
+                    self.app._log(
+                        f"{self.feature_name}: £{amount:.2f} × {mult:.2f} = £{total:.2f}",
+                        green=True,
+                    )
             
         except ValueError as e:
             self.total_var.set("Error")
-            self.target_var.set("Error")
+            self.target_var.set("—")
             messagebox.showwarning("Calculation Error", str(e))
     
     def _apply(self):
@@ -570,6 +633,7 @@ class EmbeddedCalculator:
         self.amount_var.set("")
         self.mult_var.set("")
         self.bet_var.set("")
+        self.total_target_input_var.set("")
         self.total_var.set("—")
         self.target_var.set("—")
         self.current_wager_var.set("£0.00")
@@ -651,6 +715,51 @@ class SpinDetector:
             
         return False
 
+    def wait_ready_with_grace(self, baseline: Image.Image,
+                               grace_sec: float = LONG_SPIN_GRACE_SEC,
+                               max_timeout: float = SPIN_CHANGE_TIMEOUT,
+                               allow_grace_click: bool = True) -> bool:
+        """Wait for READY state with a grace window before any rescue.
+
+        After grace_sec elapses, optionally perform a single gentle click to
+        dismiss potential overlays, then continue waiting up to max_timeout.
+        Returns True if READY is observed before timeout.
+        """
+        t0 = time.time()
+        grace_clicked = False
+        roi = self.state.spinner.roi
+        while time.time() - t0 < max_timeout:
+            if self.state.automation.stop_requested:
+                return False
+            try:
+                img = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
+                diff = _rms(img, baseline)
+            except Exception:
+                diff = PIX_DIFF_CHANGED + 1.0
+
+            if diff <= PIX_DIFF_READY:
+                return True
+
+            elapsed = time.time() - t0
+            if elapsed < grace_sec:
+                time.sleep(0.05)
+                continue
+
+            if allow_grace_click and not grace_clicked and self.state.spinner.center_xy and PYAUTOGUI_AVAILABLE:
+                try:
+                    x, y = self.state.spinner.center_xy
+                    jx = x + random.randint(-JITTER_PX, JITTER_PX)
+                    jy = y + random.randint(-JITTER_PX, JITTER_PX)
+                    pg.moveTo(jx, jy, duration=0.06)
+                    pg.click()
+                    self.log("Grace click after long wait (overlay suspected)")
+                except Exception:
+                    pass
+                grace_clicked = True
+
+            time.sleep(0.06)
+        return False
+
     def _rescue_once_then_wait_ready(self, baseline: Image.Image, wait_after_click: float = SPIN_CHANGE_TIMEOUT) -> bool:
         if not self.state.spinner.center_xy:
             return False
@@ -724,6 +833,11 @@ class SpinHelperApp(tk.Tk):
         self.counter_mode_active = False
         self.automatic_mode_active = False
         self.slots_mode_active = False
+
+        # Shared Anti-idle waggle settings (used by Clicker and Slots)
+        self.waggle_on_var = tk.BooleanVar(value=AC_DEFAULT_WAGGLE_ON)
+        self.waggle_secs_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_SECS)
+        self.waggle_amp_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_AMP)
 
         # Build UI and restore
         self._restore_geometry()
@@ -898,9 +1012,28 @@ class SpinHelperApp(tk.Tk):
         ttk.Label(counter_frame, textvariable=self.slots_counter_var, font=('Monaco', 12, 'bold'), 
                  foreground="white").pack(side=tk.LEFT, padx=(10, 0))
         
+        # Anti-idle waggle controls for Slots (shared settings with Clicker)
+        waggle_frame_slots = ttk.Frame(auto_frame)
+        waggle_frame_slots.pack(fill=tk.X, pady=(8, 0))
+        ttk.Checkbutton(waggle_frame_slots, text="Anti-idle waggle every", variable=self.waggle_on_var).pack(side=tk.LEFT)
+        ttk.Entry(waggle_frame_slots, textvariable=self.waggle_secs_var, width=4).pack(side=tk.LEFT, padx=(5, 5))
+        ttk.Label(waggle_frame_slots, text="sec, amplitude").pack(side=tk.LEFT)
+        ttk.Entry(waggle_frame_slots, textvariable=self.waggle_amp_var, width=4).pack(side=tk.LEFT, padx=(5, 5))
+        ttk.Label(waggle_frame_slots, text="px").pack(side=tk.LEFT)
+
         # Embedded calculator
         self.slots_calculator = EmbeddedCalculator(tab_slots, self, "Slots")
         self.slots_calculator.pack(fill=tk.X, padx=8, pady=8)
+
+        # Display calculator targets for visibility (under Automation Controls)
+        slots_meta_frame = ttk.Frame(auto_frame)
+        slots_meta_frame.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(slots_meta_frame, text="Target Spins:").pack(side=tk.LEFT)
+        ttk.Label(slots_meta_frame, textvariable=self.slots_calculator.target_var, font=('Monaco', 10, 'bold'),
+                  foreground="white").pack(side=tk.LEFT, padx=(6, 15))
+        ttk.Label(slots_meta_frame, text="Total Wagering:").pack(side=tk.LEFT)
+        ttk.Label(slots_meta_frame, textvariable=self.slots_calculator.total_var, font=('Monaco', 10, 'bold'),
+                  foreground="white").pack(side=tk.LEFT, padx=(6, 0))
 
     def _build_roulette_tab(self):
         tab_roulette = ttk.Frame(self.sections)
@@ -1001,15 +1134,18 @@ class SpinHelperApp(tk.Tk):
         ttk.Label(wager_frame, textvariable=self.clicker_auto_wager_var, font=('Monaco', 10, 'bold'),
                  foreground="white").pack(side=tk.LEFT, padx=(6, 0))
 
-        # Waggle controls
-        self.waggle_on_var = tk.BooleanVar(value=AC_DEFAULT_WAGGLE_ON)
-        self.waggle_secs_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_SECS)
-        self.waggle_amp_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_AMP)
+        # Waggle controls (shared settings; ensure initialized)
+        if not hasattr(self, 'waggle_on_var'):
+            self.waggle_on_var = tk.BooleanVar(value=AC_DEFAULT_WAGGLE_ON)
+        if not hasattr(self, 'waggle_secs_var'):
+            self.waggle_secs_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_SECS)
+        if not hasattr(self, 'waggle_amp_var'):
+            self.waggle_amp_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_AMP)
         
         waggle_frame = ttk.Frame(auto_frame)
         waggle_frame.pack(fill=tk.X, pady=(10, 0))
         
-        ttk.Checkbutton(waggle_frame, text="Anti-idle waggle every").pack(side=tk.LEFT)
+        ttk.Checkbutton(waggle_frame, text="Anti-idle waggle every", variable=self.waggle_on_var).pack(side=tk.LEFT)
         ttk.Entry(waggle_frame, textvariable=self.waggle_secs_var, width=4).pack(side=tk.LEFT, padx=(5, 5))
         ttk.Label(waggle_frame, text="sec, amplitude").pack(side=tk.LEFT)
         ttk.Entry(waggle_frame, textvariable=self.waggle_amp_var, width=4).pack(side=tk.LEFT, padx=(5, 5))
@@ -1225,6 +1361,7 @@ class SpinHelperApp(tk.Tk):
         """Slots automation loop with robust detection"""
         try:
             baseline = self.state_slots.spinner.baseline_ready
+            last_waggle = time.time()
             
             while (self.slots_mode_active and 
                    self.state_slots.automation.mode != AutomationMode.STOPPED and
@@ -1248,6 +1385,7 @@ class SpinHelperApp(tk.Tk):
                     self._log(f"Slots: Spin #{spin_num} - timeout waiting READY")
                     break
                 
+                t_start = time.time()
                 if not self.spin_detector.do_click():
                     self._log(f"Slots: Spin #{spin_num} - click failed")
                     continue
@@ -1257,7 +1395,7 @@ class SpinHelperApp(tk.Tk):
                         self._log(f"Slots: Spin #{spin_num} - no visual change")
                         continue
                 
-                if not self.spin_detector._wait_for_change(baseline, become_changed=False, timeout=SPIN_CHANGE_TIMEOUT):
+                if not self.spin_detector.wait_ready_with_grace(baseline, grace_sec=LONG_SPIN_GRACE_SEC, max_timeout=SPIN_CHANGE_TIMEOUT, allow_grace_click=True):
                     if not self.spin_detector._rescue_once_then_wait_ready(baseline, wait_after_click=SPIN_CHANGE_TIMEOUT/2):
                         self._log(f"Slots: Spin #{spin_num} - completion timeout")
                         continue
@@ -1265,8 +1403,16 @@ class SpinHelperApp(tk.Tk):
                 # Count successful spin
                 self.state_slots.automation.total_done += 1
                 self.slots_counter_var.set(str(self.state_slots.automation.total_done))
-                self._log(f"Slots: Spin #{spin_num} completed successfully", green=True)
-                
+                elapsed_ms = (time.time() - t_start) * 1000.0
+                self._log(f"Slots: Spin #{spin_num} completed successfully in {elapsed_ms:.0f} ms", green=True)
+
+                # Anti-idle waggle for Slots
+                if (self.waggle_on_var.get() and 
+                    time.time() - last_waggle > self.waggle_secs_var.get() and
+                    self.state_slots.spinner.center_xy):
+                    self._perform_waggle()
+                    last_waggle = time.time()
+
                 time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
                     
         except Exception as e:
@@ -1399,6 +1545,7 @@ class SpinHelperApp(tk.Tk):
                     self._log(f"Automatic: Click #{done} - timeout waiting READY")
                     break
                 
+                t_start = time.time()
                 if not self.spin_detector.do_click():
                     self._log(f"Automatic: Click #{done} - click failed")
                     break
@@ -1408,9 +1555,10 @@ class SpinHelperApp(tk.Tk):
                         self._log(f"Automatic: Click #{done} - no visual change")
                         continue
                 
-                if self.spin_detector._wait_for_change(baseline, become_changed=False, timeout=SPIN_CHANGE_TIMEOUT):
+                if self.spin_detector.wait_ready_with_grace(baseline, grace_sec=LONG_SPIN_GRACE_SEC, max_timeout=SPIN_CHANGE_TIMEOUT, allow_grace_click=True):
                     self.clicker_auto_done.set(done)
-                    self._log(f"Automatic: Click #{done}/{target} completed", green=True)
+                    elapsed_ms = (time.time() - t_start) * 1000.0
+                    self._log(f"Automatic: Click #{done}/{target} completed in {elapsed_ms:.0f} ms", green=True)
                 else:
                     self._log(f"Automatic: Click #{done} - completion timeout")
                 
