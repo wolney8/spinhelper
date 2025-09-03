@@ -10,3 +10,6 @@
 
 # Clicker - Issues/fixes and suggestions:
 1. In Automatic and in Manual, Start Auto and Single Click needs the same pre-click grace and spin detection that point 1 above in "Slots (auto) - Issues/fixes and suggestions" requires. Infact, we need this UNIVERSALLY across all features that use the spin detection functionality.
+
+# General
+1. We need to create a streamlined, one-time onboarding experience for permission requests upon the app's initial launch. The goal is to avoid forcing the user to navigate back and forth between the app and their Mac/Windows system settings. Instead of a piecemeal approach, the app should sequentially present all necessary permission prompts—including those for screenshots, accessibility (mouse control), input monitoring, and screen recording—in a single, unified flow. This process should feel seamless to the user, similar to how major apps handle multiple permission requests sequentially. Additionally, we need to address the persistent issue with the screenshot permission (Mac), as it currently prompts the user every time. We need to find a way to request this permission just once and ensure it persists for future use.
