@@ -22,11 +22,59 @@ Format follows **Keep a Changelog** and **Semantic Versioning**:
 ### Regression Watchlist (must verify before each release)
 - Window **Always-on-Top** toggle exists, works, and **persists** across launches.
 - **Delayed capture with 3-2-1 countdown** - never capture immediately when button pressed.
-- Autoclicker **Manual / Automatic / Calculator** sub-tabs exist and function.
-- **Embedded calculators** in ALL tabs (Slots, Roulette, Autoclicker).
+- Clicker **Counter / Automatic** sub-tabs exist and function properly.
+- **Embedded calculators** in ALL tabs (Slots, Roulette, Clicker).
 - **Universal spinner capture** from Environment Setup works across all features.
 - Real mouse **clicks** occur at captured coordinates with jitter.
 - Geometry file `~/.spin_helper_geometry.json` loads/saves without error.
+- **No cross-contamination** between different automation modes.
+- **Consistent button behavior** (Ready/Pause/Stop) across all features.
+
+---
+
+## [1.17.3] — 2025-09-03
+**CRITICAL HOTFIX** release fixing major functionality issues from v1.17.2.
+
+### FIXED - Critical Functionality Issues
+- **Counter mode click detection** - Manual clicks near spinner now properly increment the counter
+  - Added `ClickDetector` class using pynput to monitor left mouse clicks within 50px of spinner
+  - Counter correctly tracks clicks when in "Ready" state
+- **Cross-contamination between modes** - Fixed automatic mode starting when using Counter's Ready button
+  - Implemented `_stop_all_modes()` to ensure clean state transitions
+  - Added mode tracking flags: `counter_mode_active`, `automatic_mode_active`, `slots_mode_active`
+  - Each mode now properly isolates its state from others
+- **Mouse positioning** - Fixed issue where mouse didn't move to spinner on Ready/Start
+  - Implemented `_position_mouse_with_grace()` helper with actual pyautogui movement
+  - Added visual feedback with grace period after positioning
+- **Stop/Reset behavior** - Now properly resets counters while preserving calculator values
+  - Separate reset functions for each mode maintain calculator state
+  - Consistent logging of reset actions
+
+### FIXED - UI Consistency
+- **Unified button behavior** across all features:
+  - **Ready**: Positions mouse on spinner, applies grace period, then:
+    - Counter: Starts click detection for manual counting
+    - Automatic: Begins automated clicking with spin detection
+    - Slots: Starts automated spinning with full cycle detection
+  - **Pause**: Gracefully pauses at next ready position (automation modes only)
+  - **Stop/Reset**: Stops all activity and clears counters (preserves calculators)
+- **Button state management** - Proper enable/disable logic prevents conflicting actions
+- **Renamed "Start Auto Spins"** to "Ready" in Slots for consistency
+
+### Technical Improvements
+- **State isolation** - Each mode maintains independent state to prevent interference
+- **Grace period implementation** - 1-second pause after mouse positioning for all modes
+- **Enhanced logging** - Clear mode prefixes (e.g., "Counter:", "Automatic:", "Slots:")
+- **Click detection boundaries** - 50px radius for Counter mode click detection
+- **Error handling** - Graceful fallbacks when pynput unavailable
+
+### Breaking Changes
+- None - all existing functionality preserved with bug fixes only
+
+### Upgrade Notes
+1. **Counter mode** now requires pynput for click detection (optional dependency)
+2. **Consistent workflow**: All modes use Ready → Pause → Stop/Reset pattern
+3. **Calculator preservation**: Stop/Reset no longer clears calculator values
 
 ---
 
@@ -188,24 +236,31 @@ Format follows **Keep a Changelog** and **Semantic Versioning**:
 
 ## Architecture Notes
 
-### Core Components (v1.16.0)
-- **SpinDetector**: Handles ready→not_ready→ready state cycle detection
-- **MouseMonitor**: Background mouse position monitoring for auto-pause
+### Core Components (v1.17.3)
+- **SpinDetector**: Handles ready→not_ready→ready state cycle detection with rescue logic
+- **MouseMonitor**: Background mouse position monitoring for auto-pause (automation only)
+- **ClickDetector**: Manual click detection for Counter mode using pynput
 - **EmbeddedCalculator**: Universal calculator component with current wager display
 - **BrowserDetector**: Cross-browser window detection with proper z-order handling
 - **SessionStateSlots**: Central state management with enhanced tracking
+- **AutomationState**: Unified state tracking for all automation modes
 
 ### State Machine Logic
 ```
 READY → (click) → NOT_READY → (spin complete) → READY
   ↑                                               ↓
-  └── Only count as valid spin if full cycle ──────┘
+  └── Only count as valid spin if full cycle ─────┘
 ```
+
+### Mode Isolation (v1.17.3)
+- Each mode (`counter_mode_active`, `automatic_mode_active`, `slots_mode_active`) maintains independent state
+- `_stop_all_modes()` ensures clean transitions between modes
+- No cross-contamination of automation states
 
 ### Critical Dependencies
 - **PIL (Pillow)**: Required for all image processing and spinner detection
 - **PyAutoGUI**: Required for mouse automation and clicks
-- **pynput**: Optional for keyboard shortcuts
+- **pynput**: Optional for Counter mode click detection
 - **tkinter**: Standard library GUI framework
 
 ### File Structure
