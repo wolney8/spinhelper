@@ -21,7 +21,93 @@ Format follows **Keep a Changelog** and **Semantic Versioning**:
 
 ---
 
-## [2.1.0] — 2025-09-02
+## [1.16.0] — 2025-09-02
+**Major fixes and enhancements** addressing critical usability issues and implementing enhanced automation.
+
+### Fixed
+- **CRITICAL: Dialog z-order issue with stay-on-top**
+  - Temporarily disables parent window topmost during browser selection dialog
+  - Dialog now always appears accessible to user
+  - Automatically restores stay-on-top state after dialog closes
+- **CRITICAL: Spinner capture timing**
+  - Fixed immediate capture bug (was capturing the capture button itself)
+  - Added 3-2-1 countdown giving user time to position mouse over actual spin button
+  - Enhanced user guidance with clear instructions
+- **Enhanced readiness detection thresholds**
+  - Increased brightness tolerance to 25% (was 14%) for shaded/darker button states
+  - Increased color distance tolerance to 30.0 (was 18.0) for button variations
+  - Better handling of casino games with animated or state-changing buttons
+
+### Added
+- **Calculator embedded in EVERY feature**
+  - Slots tab: Full wagering calculator with apply-to-automation
+  - Roulette tab: Same calculator for manual bet calculations  
+  - Clicker tab: Calculator with apply-to-targets functionality
+  - No more tab switching required - calculator always available where needed
+- **Enhanced spin state cycle detection**
+  - Detailed logging: "ready to click" → "starting click" → "on-going" → "complete in XXXms"
+  - Full state tracking: ready → spinning → ready cycle detection
+  - Precise timing measurements for each spin completion
+  - No spin counted unless full ready→not-ready→ready cycle detected
+- **Native macOS ROI selection for Free-Spins**
+  - Uses built-in macOS screenshot selection tool
+  - Eliminates app window blocking during ROI selection
+  - More intuitive area selection process
+- **Enhanced automation safety**
+  - Randomized delays between spins (0.3-0.8 seconds)
+  - Improved rescue click logic with better timing
+  - State change detection prevents false positive spins
+
+### Changed
+- **Renamed "Autoclicker" → "Clicker"**
+  - Simplified to Manual and Automatic modes only
+  - Calculator moved to each feature tab instead of clicker sub-tab
+  - Cleaner UI organization following project plan
+- **Removed duplicate manual spin counter from Environment Setup**
+  - Manual tracking now integrated into feature-specific areas
+  - Eliminated redundant UI elements
+  - Streamlined Environment Setup to focus on browser selection
+- **Enhanced logging detail**
+  - Spin state transitions logged with precise timing
+  - Color-coded status messages (green for success, default for info)
+  - Better error context and recovery suggestions
+- **Improved session state management**
+  - Enhanced spinner capture data persistence
+  - Better restoration of complex UI state
+  - More robust error handling during save/restore
+
+### Technical Improvements
+- **Spinner detection algorithm enhancements**
+  - Multi-method detection: RMS + brightness + color distance
+  - Increased tolerance for casino games with animated buttons
+  - Better handling of lighting changes and visual effects
+- **State machine implementation**
+  - Proper ready→spinning→ready cycle tracking
+  - Timeout handling for each state transition
+  - Detailed logging at each state change
+- **Native macOS integration**
+  - Uses system screenshot tool for ROI selection
+  - Better AppleScript error handling and timeouts
+  - Improved browser detection reliability
+
+### Migration from v1.15.0
+- All existing configuration files compatible
+- Enhanced spinner captures will need to be re-done for best results
+- New calculator placement provides better workflow
+- Free-Spins ROI capture now uses native tool (more reliable)
+
+### Testing Results
+- ✅ Dialog z-order issue completely resolved
+- ✅ Spinner capture now works properly with countdown
+- ✅ Calculator available in all three feature tabs
+- ✅ Enhanced state detection provides reliable automation
+- ✅ Native FS ROI selection works without app window interference
+- ✅ Detailed logging provides clear automation feedback
+- ✅ Session persistence maintains all settings correctly
+
+---
+
+## [1.15.0] — 2025-09-02
 **Phase 3 implementation** adding enhanced automation features and keyboard shortcuts.
 
 ### Added
