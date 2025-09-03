@@ -30,6 +30,79 @@ Format follows **Keep a Changelog** and **Semantic Versioning**:
 
 ---
 
+## [1.17.2] — 2025-09-03
+**HOTFIX** release removing problematic focus handling that interfered with manual operations.
+
+### REMOVED - Focus Handling
+- **Focus monitoring completely removed** - Was causing automation to pause when users moved mouse to click after "Ready" button
+- **FocusMonitor class removed** - Eliminated all focus detection and related pause logic
+- **Auto-pause on focus loss removed** - No longer interferes with normal clicking workflow
+
+### FIXED - Mouse Movement Behavior  
+- **Mouse movement pause** now only affects active automation, not manual positioning
+- **Counter mode workflow** - "Ready" button positioning no longer triggers unwanted pauses
+- **Manual clicking** - Users can freely move mouse for manual operations without interference
+
+### Technical Changes
+- Removed `FocusMonitor` class and all focus detection logic
+- Simplified pause state management to mouse movement only during automation
+- Updated system info to clarify mouse movement behavior
+- Maintained all robust spin detection from v1.17.1
+
+### Upgrade Notes
+1. **Manual operations** - Mouse positioning for manual clicks no longer causes pauses
+2. **Automation pause** - Only mouse movement during active automation triggers pause
+3. **Focus behavior** - App no longer monitors or reacts to window focus changes
+
+---
+
+## [1.17.1] — 2025-09-03
+**HOTFIX** release addressing critical spin detection and UX issues from test feedback.
+
+### FIXED - Critical Regression Prevention
+- **Robust spin detection** - Integrated working patterns from August code to eliminate stuck "waiting for spin" states:
+  - `_ensure_ready_before_click()` with proper grace clicks that don't count toward totals
+  - `_rescue_once_then_wait_ready()` for single rescue attempts
+  - `_wait_change_sticky()` for proper state transition detection
+  - Blip detection ignores invalid short spins (<2000ms)
+- **UI visibility** - Changed dark blue text to **white** for readability on grey backgrounds:
+  - Spin counters, current wager displays, click counters now use white text
+- **Focus-based automation** - App pauses when losing focus, requires manual resume
+
+### FIXED - Naming and Behavior Alignment
+- **Autoclicker → Clicker** - Renamed tab and updated functionality
+- **Manual → Counter** - Sub-tab renamed with proper manual-only behavior:
+  - "Single Click" → "Ready" button (positions mouse only, user must click)
+  - No automatic clicking in Counter mode
+  - User input required for all actions
+- **Consistent logging** - Unified log output format across all features
+
+### Added - Enhanced UX Features
+- **Auto stay-on-top toggle** - Automatically disables during browser/FS selection, restores after
+- **Comprehensive pause system** - Pause buttons added to:
+  - Slots automation controls
+  - Clicker Counter mode  
+  - Clicker Automatic mode
+- **Focus monitoring** - `FocusMonitor` class detects app focus loss and pauses automation
+- **Enhanced error handling** - Better detection of stuck states with recovery mechanisms
+
+### Technical Improvements
+- Integrated proven spin detection algorithms from working August 2025 codebase
+- Enhanced state machine with proper ready→not_ready→ready cycle validation
+- Improved mouse movement pause detection with graceful resume
+- Better error logging with color coding (white=info, green=success, red=error)
+
+### Breaking Changes
+- Counter mode behavior changed: no automatic clicking, user must manually click after "Ready"
+- Focus loss now pauses automation (requires manual resume)
+
+### Upgrade Notes
+1. **Counter Mode**: Use "Ready" to position mouse, then manually click. No automation in this mode.
+2. **Focus Handling**: Automation pauses if app loses focus - resume manually when ready.
+3. **Stay-on-Top**: Automatically toggles during dialogs for better UX.
+
+---
+
 ## [1.16.0] — 2025-09-03
 **Major enhancement** release addressing core spin detection, target logic, and user experience issues.
 

@@ -1,12 +1,6 @@
-# spin_helper.py — v1.16.1 HOTFIX
-# Fixed regression from v1.15.0 and implemented requested enhancements:
-# - Proper spin state cycle detection (ready→not_ready→ready)
-# - Mouse movement pause detection with seamless resume
-# - Target stopping logic (spins OR wager amount)  
-# - Current wager display in calculator
-# - Pause button in automation controls
-# - Enhanced Environment Setup with universal spinner capture
-# - Preserved working delayed capture and embedded calculators
+# spin_helper.py — v1.17.2 HOTFIX
+# REMOVED: Focus handling feature that was causing interference with normal usage
+# FIXED: Mouse movement now only pauses during actual automation, not manual positioning
 
 import os
 import sys
@@ -50,21 +44,28 @@ except ImportError:
 
 # --------------- Constants ---------------
 
-APP_VERSION = "1.16.1 HOTFIX"
+APP_VERSION = "1.17.2"
 UI_FLUSH_MS = 60
 
-# Enhanced readiness thresholds
-PIX_DIFF_READY = 7.5
+# Enhanced readiness thresholds (from working August code)
+PIX_DIFF_READY = 4.0
+PIX_DIFF_CHANGED = 10.0
 BRIGHT_READY_TOL = 0.25
 COLOR_D_READY_TOL = 30.0
 
-# NEW: Spin state detection for proper cycle tracking
-SPIN_STATE_CHANGE_THRESHOLD = 15.0
-SPIN_COMPLETE_TIMEOUT_MS = 45000
+# Spin state detection (improved from August code)
+SPIN_CHANGE_TIMEOUT = 25.0
+CHANGE_STICK_MS = 180
+MIN_VALID_SPIN_MS = 2000
+MAX_CONSECUTIVE_BLIPS = 3
 
-# NEW: Mouse movement pause detection
-MOUSE_PAUSE_THRESHOLD = 80  # pixels from capture point
-MOUSE_CHECK_INTERVAL = 0.5  # seconds
+# Mouse movement pause detection
+MOUSE_PAUSE_THRESHOLD = 80
+MOUSE_CHECK_INTERVAL = 0.5
+
+# Click timing (from August code)
+JITTER_PX = 2
+DELAY_MIN, DELAY_MAX = 0.35, 0.75
 
 # Defaults
 AC_DEFAULT_WAGGLE_ON = False
@@ -135,11 +136,13 @@ class SessionStateSlots:
     spinner: SpinnerCapture = None
     fs_roi: Optional[SpinnerROI] = None
     detect_fs: bool = True
-    # NEW: Enhanced state tracking
     current_spin_state: SpinState = SpinState.UNKNOWN
     total_spins: int = 0
     paused_by_mouse: bool = False
+    paused_manually: bool = False
     last_mouse_pos: Optional[Tuple[int,int]] = None
+    stop_after_current_spin: bool = False
+    spin_started_at: Optional[float] = None
     
     def __post_init__(self):
         if self.spinner is None:
@@ -151,7 +154,7 @@ class WindowInfo:
     app_name: str
     window_id: Optional[str] = None
 
-# --------------- NEW: Mouse Movement Monitor ---------------
+# --------------- Enhanced Mouse Movement Monitor ---------------
 
 class MouseMonitor:
     def __init__(self, state: SessionStateSlots, log_func):
@@ -181,10 +184,10 @@ class MouseMonitor:
                     
                     if distance > MOUSE_PAUSE_THRESHOLD and not self.state.paused_by_mouse:
                         self.state.paused_by_mouse = True
-                        self.log(f"Auto-paused: mouse moved {distance:.0f}px from spinner", green=True)
+                        self.log(f"Auto-paused: mouse moved {distance:.0f}px from spinner")
                     elif distance <= MOUSE_PAUSE_THRESHOLD and self.state.paused_by_mouse:
                         self.state.paused_by_mouse = False
-                        self.log("Auto-resume: mouse returned to spinner area", green=True)
+                        self.log("Auto-resume: mouse returned to spinner area")
                         
             except Exception:
                 pass
@@ -248,14 +251,15 @@ class BrowserDetector:
         self.detected_windows = detected
         return detected
     
-    def show_selection_dialog(self, parent):
-        # Store and disable parent topmost temporarily
+    def show_selection_dialog(self, parent, auto_toggle_topmost=True):
+        # AUTO TOGGLE: Disable stay-on-top for better dialog experience  
         parent_was_topmost = False
         try:
             parent_was_topmost = parent.attributes("-topmost")
-            if parent_was_topmost:
+            if parent_was_topmost and auto_toggle_topmost:
                 parent.attributes("-topmost", False)
                 parent.update()
+                parent._log("Stay-on-top temporarily disabled for dialog")
         except Exception:
             pass
         
@@ -339,11 +343,12 @@ class BrowserDetector:
         # Run modal dialog
         dialog.wait_window()
         
-        # Restore parent topmost state
+        # AUTO TOGGLE: Restore stay-on-top after dialog
         try:
-            if parent_was_topmost:
+            if parent_was_topmost and auto_toggle_topmost:
                 parent.attributes("-topmost", True)
                 parent.update()
+                parent._log("Stay-on-top restored after dialog")
         except Exception:
             pass
         
@@ -355,7 +360,17 @@ class BrowserDetector:
 
 class ROISelector:
     @staticmethod
-    def select_roi_native(parent):
+    def select_roi_native(parent, auto_toggle_topmost=True):
+        # AUTO TOGGLE: Disable stay-on-top for FS area selection
+        parent_was_topmost = False
+        try:
+            parent_was_topmost = parent.attributes("-topmost") 
+            if parent_was_topmost and auto_toggle_topmost:
+                parent.attributes("-topmost", False)
+                parent.update()
+        except Exception:
+            pass
+            
         try:
             parent.withdraw()
             
@@ -371,10 +386,25 @@ class ROISelector:
             parent.deiconify()
             parent.lift()
             
+            # AUTO TOGGLE: Restore stay-on-top after FS selection
+            try:
+                if parent_was_topmost and auto_toggle_topmost:
+                    parent.attributes("-topmost", True)
+                    parent.update()
+            except Exception:
+                pass
+            
             return result.returncode == 0
             
         except Exception:
             parent.deiconify()
+            # AUTO TOGGLE: Restore on error too
+            try:
+                if parent_was_topmost and auto_toggle_topmost:
+                    parent.attributes("-topmost", True)
+                    parent.update()
+            except Exception:
+                pass
             return False
 
 # --------------- Enhanced Calculator Component ---------------
@@ -390,12 +420,10 @@ class EmbeddedCalculator:
         self.bet_var = tk.StringVar()
         self.total_var = tk.StringVar(value="—")
         self.target_var = tk.StringVar(value="—")
-        # NEW: Current wager display
         self.current_wager_var = tk.StringVar(value="£0.00")
         
         self._build_ui()
         
-        # NEW: Auto-update current wager when spins change
         if hasattr(self.app, 'state_slots'):
             self._update_timer()
     
@@ -417,16 +445,16 @@ class EmbeddedCalculator:
         result_frame = ttk.Frame(self.frame)
         result_frame.pack(fill=tk.X, pady=(5, 0))
         
-        ttk.Label(result_frame, text="Total wagering:").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        ttk.Label(result_frame, text="Total Wager:").grid(row=0, column=0, sticky="w", padx=(0, 5))
         ttk.Label(result_frame, textvariable=self.total_var, font=('Monaco', 9, 'bold')).grid(row=0, column=1, padx=(0, 15))
         
-        ttk.Label(result_frame, text="Target spins:").grid(row=0, column=2, sticky="w", padx=(0, 5))
+        ttk.Label(result_frame, text="Target Spins:").grid(row=0, column=2, sticky="w", padx=(0, 5))
         ttk.Label(result_frame, textvariable=self.target_var, font=('Monaco', 9, 'bold')).grid(row=0, column=3, padx=(0, 15))
         
-        # NEW: Current wager display
-        ttk.Label(result_frame, text="Current wager:").grid(row=0, column=4, sticky="w", padx=(0, 5))
+        # Current wager display with white text for visibility
+        ttk.Label(result_frame, text="Current Wager:").grid(row=0, column=4, sticky="w", padx=(0, 5))
         ttk.Label(result_frame, textvariable=self.current_wager_var, font=('Monaco', 9, 'bold'), 
-                 foreground="blue").grid(row=0, column=5)
+                 foreground="white").grid(row=0, column=5)
         
         # Buttons
         button_frame = ttk.Frame(self.frame)
@@ -479,11 +507,11 @@ class EmbeddedCalculator:
             
             target = int(target_str)
             
-            # Apply to clicker controls if they exist
-            if hasattr(self.app, 'ac_manual_target'):
-                self.app.ac_manual_target.set(target)
-            if hasattr(self.app, 'ac_auto_target'):
-                self.app.ac_auto_target.set(target)
+            # Apply to clicker controls if they exist  
+            if hasattr(self.app, 'clicker_manual_target'):
+                self.app.clicker_manual_target.set(target)
+            if hasattr(self.app, 'clicker_auto_target'):
+                self.app.clicker_auto_target.set(target)
             
             self.app._log(f"{self.feature_name} target applied: {target}", green=True)
             
@@ -502,7 +530,7 @@ class EmbeddedCalculator:
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
 
-# --------------- Enhanced Spin Detection ---------------
+# --------------- Enhanced Spin Detection (from working August code) ---------------
 
 class SpinDetector:
     def __init__(self, state: SessionStateSlots, log_func):
@@ -510,7 +538,7 @@ class SpinDetector:
         self.log = log_func
         
     def get_current_state(self) -> SpinState:
-        """Enhanced state detection that ignores 'hey click me' animations"""
+        """Enhanced state detection using working August patterns"""
         if not PIL_AVAILABLE or not self.state.spinner.is_valid:
             return SpinState.UNKNOWN
             
@@ -520,71 +548,153 @@ class SpinDetector:
         try:
             current = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
             
-            # RMS difference check
+            # Use RMS difference as primary check (from August code)
             rms = _rms(current, spinner.baseline_ready)
-            rms_ok = rms <= PIX_DIFF_READY
             
-            # Brightness check (more tolerant for shaded buttons)
-            curr_brightness = _brightness(current)
-            brightness_ok = True
-            if spinner.ready_brightness is not None:
-                brightness_diff = spinner.ready_brightness - curr_brightness
-                brightness_ok = brightness_diff <= BRIGHT_READY_TOL
-            
-            # Color distance check
-            color_ok = True
-            if spinner.ready_color:
-                curr_color = _avg_rgb(current)
-                color_distance = _color_dist(curr_color, spinner.ready_color)
-                color_ok = color_distance <= COLOR_D_READY_TOL
-            
-            return SpinState.READY if (rms_ok or (brightness_ok and color_ok)) else SpinState.NOT_READY
+            # Ready if RMS is within threshold
+            if rms <= PIX_DIFF_READY:
+                return SpinState.READY
+            elif rms >= PIX_DIFF_CHANGED:
+                return SpinState.NOT_READY
+            else:
+                return SpinState.UNKNOWN
             
         except Exception:
             return SpinState.UNKNOWN
-    
-    def wait_for_spin_cycle(self, timeout_s: float = 30.0) -> bool:
-        """Wait for complete ready→not_ready→ready cycle (ignores animations)"""
-        start_time = time.time()
+
+    def _is_ready(self) -> bool:
+        """Simple readiness check"""
+        return self.get_current_state() == SpinState.READY
+
+    def _wait_change_sticky(self, baseline: Image.Image, min_stick_ms: int, timeout: float) -> bool:
+        """Wait for sticky change (from August code patterns)"""
+        t0 = time.time()
+        changed_at = None
         
-        # Phase 1: Ensure we start in ready state
-        initial_state = self.get_current_state()
-        if initial_state != SpinState.READY:
-            self.log("Waiting for initial READY state...")
-            while time.time() - start_time < 5.0:
-                if self.get_current_state() == SpinState.READY:
-                    break
-                time.sleep(0.1)
-            else:
-                self.log("Timeout waiting for initial READY state")
+        while time.time() - t0 < timeout:
+            if self.state.stop_after_current_spin:
                 return False
+                
+            img = ImageGrab.grab(bbox=(self.state.spinner.roi.x, self.state.spinner.roi.y, 
+                                     self.state.spinner.roi.x + self.state.spinner.roi.w, 
+                                     self.state.spinner.roi.y + self.state.spinner.roi.h))
+            diff = _rms(img, baseline)
+            
+            if diff >= PIX_DIFF_CHANGED:
+                if changed_at is None:
+                    changed_at = time.time()
+                elif (time.time() - changed_at) * 1000.0 >= min_stick_ms:
+                    return True
+            else:
+                changed_at = None
+                
+            time.sleep(0.04)
+            
+        return False
+
+    def _wait_for_change(self, baseline: Image.Image, become_changed=True, timeout=SPIN_CHANGE_TIMEOUT) -> bool:
+        """Wait for state change (from August code)"""
+        t0 = time.time()
         
-        # Phase 2: Wait for transition to NOT_READY (actual spin started)
-        self.log("Waiting for spin to start (READY→NOT_READY)...")
-        transition_detected = False
-        while time.time() - start_time < timeout_s:
-            current_state = self.get_current_state()
-            if current_state == SpinState.NOT_READY:
-                self.log("Spin transition detected (NOT_READY)")
-                transition_detected = True
-                break
-            time.sleep(0.1)
+        while time.time() - t0 < timeout:
+            if self.state.stop_after_current_spin or self.state.paused_manually:
+                return False
+                
+            roi = self.state.spinner.roi
+            current = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
+            diff = _rms(current, baseline)
+            
+            if become_changed and diff >= PIX_DIFF_CHANGED:
+                return True
+            if not become_changed and diff <= PIX_DIFF_READY:
+                return True
+                
+            time.sleep(0.05)
+            
+        return False
+
+    def _rescue_once_then_wait_ready(self, baseline: Image.Image, wait_after_click: float = SPIN_CHANGE_TIMEOUT) -> bool:
+        """Single rescue click then wait (from August code)"""
+        if not self.state.spinner.center_xy:
+            return False
+            
+        x, y = self.state.spinner.center_xy
+        try:
+            # Jittered rescue click
+            jx = x + random.randint(-JITTER_PX, JITTER_PX)
+            jy = y + random.randint(-JITTER_PX, JITTER_PX)
+            pg.moveTo(jx, jy, duration=0.06)
+            pg.click()
+            self.log("Rescue click #1")
+            
+            # Wait for ready state
+            return self._wait_for_change(baseline, become_changed=False, timeout=wait_after_click)
+        except Exception as e:
+            self.log(f"Rescue click failed: {e}")
+            return False
+
+    def _ensure_ready_before_click(self, baseline: Image.Image) -> bool:
+        """Ensure ready state before clicking (from August code logic)"""
+        # Quick ready check first
+        if self._wait_for_change(baseline, become_changed=False, timeout=2.5):
+            return True
+            
+        # If not ready, try rescue click
+        if self._rescue_once_then_wait_ready(baseline, wait_after_click=SPIN_CHANGE_TIMEOUT):
+            return True
+            
+        return False
+
+    def do_click(self, with_jitter: bool = True) -> bool:
+        """Perform click with jitter"""
+        if not self.state.spinner.center_xy:
+            return False
+            
+        x, y = self.state.spinner.center_xy
+        try:
+            if pg:
+                if with_jitter:
+                    jx = x + random.randint(-JITTER_PX, JITTER_PX)
+                    jy = y + random.randint(-JITTER_PX, JITTER_PX)
+                    pg.moveTo(jx, jy, duration=0.08)
+                else:
+                    pg.moveTo(x, y, duration=0.08)
+                pg.click()
+                return True
+            else:
+                time.sleep(0.05)
+                return True
+        except Exception as e:
+            self.log(f"Click failed: {e}")
+            return False
+
+    def wait_for_spin_cycle(self, timeout_s: float = 30.0) -> bool:
+        """Wait for complete ready→not_ready→ready cycle with robust detection"""
+        baseline = self.state.spinner.baseline_ready
         
-        if not transition_detected:
-            self.log("No spin transition detected - may be animation")
+        # Phase 1: Ensure ready before proceeding
+        if not self._ensure_ready_before_click(baseline):
+            self.log("Failed to achieve READY state before spin")
             return False
         
-        # Phase 3: Wait for return to READY (spin complete)
-        self.log("Waiting for spin completion (NOT_READY→READY)...")
-        while time.time() - start_time < timeout_s:
-            current_state = self.get_current_state()
-            if current_state == SpinState.READY:
-                self.log("Spin cycle complete (READY detected)")
-                return True
-            time.sleep(0.1)
-                
-        self.log("Timeout waiting for spin completion")
-        return False
+        self.log("Ready confirmed")
+        
+        # Phase 2: Wait for visual change after click (spin started)
+        if not self._wait_change_sticky(baseline, CHANGE_STICK_MS, timeout=0.9):
+            self.log("No visual change - trying rescue click")
+            if not self._rescue_once_then_wait_ready(baseline, wait_after_click=3.0):
+                self.log("No visual change after rescue")
+                return False
+        
+        # Phase 3: Wait for return to ready (spin complete)  
+        if not self._wait_for_change(baseline, become_changed=False, timeout=timeout_s):
+            self.log("Did not return to READY - final rescue attempt")
+            if not self._rescue_once_then_wait_ready(baseline, wait_after_click=timeout_s/2):
+                self.log("Timeout waiting for spin completion")
+                return False
+        
+        self.log("Spin cycle complete")
+        return True
 
 # --------------- Main Application ---------------
 
@@ -598,14 +708,15 @@ class SpinHelperApp(tk.Tk):
         self.browser_detector = BrowserDetector()
         self.state_slots = SessionStateSlots()
         
-        # NEW: Enhanced components
+        # Enhanced components
         self.spin_detector = SpinDetector(self.state_slots, self._log)
         self.mouse_monitor = MouseMonitor(self.state_slots, self._log)
         
         self._log_q = queue.Queue()
         self._running_slots = False
-        self._running_ac = False
+        self._running_clicker = False
         self._stop_evt = threading.Event()
+        self._blip_count = 0
         
         # Keyboard listener
         self.keyboard_listener = None
@@ -616,7 +727,7 @@ class SpinHelperApp(tk.Tk):
         self._build_ui()
         self.after(UI_FLUSH_MS, self._drain_log)
         
-        self._log("Spin Helper v1.16.0 initialized with enhancements", green=True)
+        self._log("Spin Helper v1.17.2 HOTFIX initialized (focus handling removed)", green=True)
 
     def _setup_keyboard_shortcuts(self):
         if not PYNPUT_AVAILABLE:
@@ -676,7 +787,7 @@ class SpinHelperApp(tk.Tk):
         self._build_env_tab()
         self._build_slots_tab()
         self._build_roulette_tab()
-        self._build_autoclicker_tab()
+        self._build_clicker_tab()
 
         # Right log panel
         right = ttk.Frame(self.paned)
@@ -692,8 +803,10 @@ class SpinHelperApp(tk.Tk):
         # Log styling
         self.tag_green = "green"
         self.tag_blue = "blue"
+        self.tag_red = "red"
         self.log.tag_configure(self.tag_green, foreground="#00a000")
         self.log.tag_configure(self.tag_blue, foreground="#0066cc")
+        self.log.tag_configure(self.tag_red, foreground="#cc0000")
 
         # Mouse wheel support
         self.left_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
@@ -715,7 +828,8 @@ class SpinHelperApp(tk.Tk):
         ttk.Label(browser_frame, text=(
             "Step 1: Open your casino game in Chrome/Safari/Firefox\n"
             "Step 2: Click 'Select Browser Window' below\n"
-            "Step 3: Choose your casino tab from the list"
+            "Step 3: Choose your casino tab from the list\n"
+            "Note: Stay-on-top will be temporarily disabled during selection"
         )).pack(anchor='w', pady=(0, 10))
         
         button_frame = ttk.Frame(browser_frame)
@@ -727,14 +841,14 @@ class SpinHelperApp(tk.Tk):
         self.browser_status_var = tk.StringVar(value="No browser window selected")
         ttk.Label(browser_frame, textvariable=self.browser_status_var).pack(anchor='w', pady=(10, 0))
         
-        # NEW: Universal Spinner Capture
+        # Universal Spinner Capture
         spinner_frame = ttk.LabelFrame(tab_env, text="Universal Spinner Button Capture", padding=10)
         spinner_frame.pack(fill=tk.X, padx=8, pady=8)
         
         ttk.Label(spinner_frame, text=(
             "Position your mouse over the spin button, then click 'Capture Spinner Button'.\n"
             "The app will give you 3 seconds to position your mouse correctly.\n"
-            "This capture will be used across all features (Slots, Roulette, Autoclicker)."
+            "This capture will be used across all features (Slots, Roulette, Clicker)."
         )).pack(anchor='w', pady=(0, 8))
         
         spinner_controls = ttk.Frame(spinner_frame)
@@ -745,7 +859,7 @@ class SpinHelperApp(tk.Tk):
         self.spinner_status_var = tk.StringVar(value="No spinner captured")
         ttk.Label(spinner_controls, textvariable=self.spinner_status_var).pack(side=tk.LEFT, padx=(15, 0))
         
-        # NEW: Spinner preview thumbnail
+        # Spinner preview thumbnail
         self.spinner_thumb_label = ttk.Label(spinner_controls)
         self.spinner_thumb_label.pack(side=tk.LEFT, padx=(10, 0))
         
@@ -754,11 +868,12 @@ class SpinHelperApp(tk.Tk):
         sys_frame.pack(fill=tk.X, padx=8, pady=8)
         
         info_text = f"Python: {sys.version.split()[0]} | Platform: {sys.platform}\n"
-        info_text += f"PIL: {PIL_AVAILABLE} | PyAutoGUI: {PYAUTOGUI_AVAILABLE} | Pynput: {PYNPUT_AVAILABLE}"
+        info_text += f"PIL: {PIL_AVAILABLE} | PyAutoGUI: {PYAUTOGUI_AVAILABLE} | Pynput: {PYNPUT_AVAILABLE}\n"
+        info_text += "Mouse movement pauses automation (manual resume required)"
         ttk.Label(sys_frame, text=info_text, justify=tk.LEFT).pack(anchor='w')
 
     def _build_slots_tab(self):
-        """Enhanced Slots tab with embedded calculator and improved controls"""
+        """Enhanced Slots tab with robust controls"""
         tab_slots = ttk.Frame(self.sections)
         self.sections.add(tab_slots, text="Slots (auto)")
         
@@ -773,7 +888,7 @@ class SpinHelperApp(tk.Tk):
         ttk.Checkbutton(fs_controls, text="Detect Free-Spins banner", variable=self.detect_fs_var, command=self._toggle_fs).pack(side=tk.LEFT)
         ttk.Button(fs_controls, text="Select FS Area (Native)", command=self._capture_fs_native).pack(side=tk.LEFT, padx=(20, 0))
         
-        # NEW: Enhanced automation controls with Pause button
+        # Enhanced automation controls with all buttons
         auto_frame = ttk.LabelFrame(tab_slots, text="Automation Controls", padding=8)
         auto_frame.pack(fill=tk.X, padx=8, pady=8)
         
@@ -783,25 +898,23 @@ class SpinHelperApp(tk.Tk):
         self.slots_start_btn = ttk.Button(auto_controls, text="Start Auto Spins", command=self._start_slots)
         self.slots_start_btn.pack(side=tk.LEFT, padx=(0, 5))
         
-        # NEW: Pause button
         self.slots_pause_btn = ttk.Button(auto_controls, text="Pause", command=self._pause_slots, state=tk.DISABLED)
         self.slots_pause_btn.pack(side=tk.LEFT, padx=(0, 5))
         
         self.slots_stop_btn = ttk.Button(auto_controls, text="Stop", command=self._stop_slots, state=tk.DISABLED)
         self.slots_stop_btn.pack(side=tk.LEFT, padx=(0, 5))
         
-        # NEW: Reset button
         self.slots_reset_btn = ttk.Button(auto_controls, text="Reset", command=self._reset_slots)
         self.slots_reset_btn.pack(side=tk.LEFT)
         
-        # NEW: Spin counter display
+        # Spin counter display with white text
         counter_frame = ttk.Frame(auto_frame)
         counter_frame.pack(fill=tk.X, pady=(8, 0))
         
         ttk.Label(counter_frame, text="Spins Completed:").pack(side=tk.LEFT)
         self.spin_counter_var = tk.StringVar(value="0")
         ttk.Label(counter_frame, textvariable=self.spin_counter_var, font=('Monaco', 12, 'bold'), 
-                 foreground="blue").pack(side=tk.LEFT, padx=(10, 0))
+                 foreground="white").pack(side=tk.LEFT, padx=(10, 0))
         
         # Embedded calculator
         self.slots_calculator = EmbeddedCalculator(tab_slots, self, "Slots")
@@ -825,36 +938,44 @@ class SpinHelperApp(tk.Tk):
         self.roulette_calculator = EmbeddedCalculator(tab_roulette, self, "Roulette")
         self.roulette_calculator.pack(fill=tk.X, padx=8, pady=8)
 
-    def _build_autoclicker_tab(self):
-        """Fixed Autoclicker tab with Manual/Automatic modes and embedded calculator"""
+    def _build_clicker_tab(self):
+        """Clicker tab with Counter/Automatic modes"""
         tab_clicker = ttk.Frame(self.sections)
-        self.sections.add(tab_clicker, text="Autoclicker")
+        self.sections.add(tab_clicker, text="Clicker")
         
         # Sub-notebook
         self.clicker_notebook = ttk.Notebook(tab_clicker)
         self.clicker_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         
-        # Manual mode
-        manual_tab = ttk.Frame(self.clicker_notebook)
-        self.clicker_notebook.add(manual_tab, text="Manual")
+        # Counter mode (manual only)
+        counter_tab = ttk.Frame(self.clicker_notebook)
+        self.clicker_notebook.add(counter_tab, text="Counter")
         
-        manual_frame = ttk.LabelFrame(manual_tab, text="Manual Click Controls", padding=8)
-        manual_frame.pack(fill=tk.X, padx=8, pady=8)
+        counter_frame = ttk.LabelFrame(counter_tab, text="Manual Click Counter", padding=8)
+        counter_frame.pack(fill=tk.X, padx=8, pady=8)
         
-        self.ac_manual_target = tk.IntVar(value=0)
-        self.ac_manual_done = tk.IntVar(value=0)
+        ttk.Label(counter_frame, text=(
+            "Counter mode: User manually clicks, app counts clicks.\n"
+            "'Ready' positions mouse at spinner - YOU must click the mouse button.\n"
+            "No automatic clicking occurs in Counter mode."
+        )).pack(anchor='w', pady=(0, 8))
         
-        manual_controls = ttk.Frame(manual_frame)
-        manual_controls.pack(fill=tk.X)
+        self.clicker_manual_target = tk.IntVar(value=0)
+        self.clicker_manual_done = tk.IntVar(value=0)
         
-        ttk.Label(manual_controls, text="Target:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(manual_controls, textvariable=self.ac_manual_target, width=8).grid(row=0, column=1, padx=(5, 15))
+        counter_controls = ttk.Frame(counter_frame)
+        counter_controls.pack(fill=tk.X)
         
-        ttk.Label(manual_controls, text="Done:").grid(row=0, column=2, sticky="w")
-        ttk.Label(manual_controls, textvariable=self.ac_manual_done, font=('Monaco', 10, 'bold')).grid(row=0, column=3, padx=(5, 15))
+        ttk.Label(counter_controls, text="Target:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(counter_controls, textvariable=self.clicker_manual_target, width=8).grid(row=0, column=1, padx=(5, 15))
         
-        ttk.Button(manual_controls, text="Single Click", command=self._manual_click).grid(row=0, column=4, padx=(10, 5))
-        ttk.Button(manual_controls, text="Reset", command=self._reset_manual).grid(row=0, column=5)
+        ttk.Label(counter_controls, text="Done:").grid(row=0, column=2, sticky="w")
+        ttk.Label(counter_controls, textvariable=self.clicker_manual_done, font=('Monaco', 10, 'bold'),
+                 foreground="white").grid(row=0, column=3, padx=(5, 15))
+        
+        ttk.Button(counter_controls, text="Ready", command=self._clicker_ready).grid(row=0, column=4, padx=(10, 5))
+        ttk.Button(counter_controls, text="Pause", command=self._clicker_pause_counter).grid(row=0, column=5, padx=(0, 5))
+        ttk.Button(counter_controls, text="Reset", command=self._reset_counter).grid(row=0, column=6)
         
         # Automatic mode
         auto_tab = ttk.Frame(self.clicker_notebook)
@@ -863,23 +984,27 @@ class SpinHelperApp(tk.Tk):
         auto_frame = ttk.LabelFrame(auto_tab, text="Automatic Click Controls", padding=8)
         auto_frame.pack(fill=tk.X, padx=8, pady=8)
         
-        self.ac_auto_target = tk.IntVar(value=0)
-        self.ac_auto_done = tk.IntVar(value=0)
+        self.clicker_auto_target = tk.IntVar(value=0)
+        self.clicker_auto_done = tk.IntVar(value=0)
         
         auto_controls = ttk.Frame(auto_frame)
         auto_controls.pack(fill=tk.X)
         
         ttk.Label(auto_controls, text="Target:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(auto_controls, textvariable=self.ac_auto_target, width=8).grid(row=0, column=1, padx=(5, 15))
+        ttk.Entry(auto_controls, textvariable=self.clicker_auto_target, width=8).grid(row=0, column=1, padx=(5, 15))
         
         ttk.Label(auto_controls, text="Done:").grid(row=0, column=2, sticky="w")
-        ttk.Label(auto_controls, textvariable=self.ac_auto_done, font=('Monaco', 10, 'bold')).grid(row=0, column=3, padx=(5, 15))
+        ttk.Label(auto_controls, textvariable=self.clicker_auto_done, font=('Monaco', 10, 'bold'),
+                 foreground="white").grid(row=0, column=3, padx=(5, 15))
         
-        self.auto_start_btn = ttk.Button(auto_controls, text="Start Auto", command=self._start_auto)
-        self.auto_start_btn.grid(row=0, column=4, padx=(10, 5))
+        self.clicker_auto_start_btn = ttk.Button(auto_controls, text="Start Auto", command=self._start_clicker_auto)
+        self.clicker_auto_start_btn.grid(row=0, column=4, padx=(10, 5))
         
-        self.auto_stop_btn = ttk.Button(auto_controls, text="Stop", command=self._stop_auto, state=tk.DISABLED)
-        self.auto_stop_btn.grid(row=0, column=5)
+        self.clicker_auto_pause_btn = ttk.Button(auto_controls, text="Pause", command=self._pause_clicker_auto, state=tk.DISABLED)
+        self.clicker_auto_pause_btn.grid(row=0, column=5, padx=(0, 5))
+        
+        self.clicker_auto_stop_btn = ttk.Button(auto_controls, text="Stop", command=self._stop_clicker_auto, state=tk.DISABLED)
+        self.clicker_auto_stop_btn.grid(row=0, column=6)
         
         # Waggle controls
         self.waggle_on_var = tk.BooleanVar(value=AC_DEFAULT_WAGGLE_ON)
@@ -896,7 +1021,7 @@ class SpinHelperApp(tk.Tk):
         ttk.Label(waggle_frame, text="px").pack(side=tk.LEFT)
         
         # Embedded calculator
-        self.clicker_calculator = EmbeddedCalculator(tab_clicker, self, "Autoclicker")
+        self.clicker_calculator = EmbeddedCalculator(tab_clicker, self, "Clicker")
         self.clicker_calculator.pack(fill=tk.X, padx=8, pady=8)
 
     # ---------- Browser Selection ----------
@@ -904,7 +1029,7 @@ class SpinHelperApp(tk.Tk):
     def _select_browser(self):
         self._log("Starting browser window selection...")
         try:
-            selected = self.browser_detector.show_selection_dialog(self)
+            selected = self.browser_detector.show_selection_dialog(self, auto_toggle_topmost=True)
             if selected:
                 self.browser_status_var.set(f"✓ {selected.app_name}: {selected.title}")
                 self.status.config(text="Browser selected - Capture spinner next")
@@ -921,10 +1046,10 @@ class SpinHelperApp(tk.Tk):
         real_count = len([w for w in windows if not "Manual" in w.app_name])
         self._log(f"Found {real_count} real browser windows")
 
-    # ---------- FIXED: Enhanced Spinner Capture ----------
+    # ---------- Enhanced Spinner Capture ----------
 
     def _capture_spinner_delayed(self):
-        """FIXED: Proper delayed capture with countdown (not immediate)"""
+        """Proper delayed capture with countdown"""
         if not PIL_AVAILABLE:
             messagebox.showerror("PIL Required", "PIL is required for spinner capture.")
             return
@@ -936,7 +1061,6 @@ class SpinHelperApp(tk.Tk):
         self._log("Spinner capture starting - Move mouse over spin button NOW", green=True)
         self._log("Capturing in 3...", green=True)
         
-        # Properly schedule the countdown
         self.after(1000, lambda: self._log("Capturing in 2...", green=True))
         self.after(2000, lambda: self._log("Capturing in 1...", green=True))
         self.after(3000, self._execute_spinner_capture)
@@ -945,7 +1069,7 @@ class SpinHelperApp(tk.Tk):
         """Execute spinner capture after countdown"""
         try:
             x, y = self.winfo_pointerxy()
-            w = h = 40
+            w = h = 60
             left, top = int(x - w//2), int(y - h//2)
             
             baseline = ImageGrab.grab(bbox=(left, top, left + w, top + h))
@@ -955,7 +1079,7 @@ class SpinHelperApp(tk.Tk):
             thumb_img.thumbnail((32, 32))
             thumbnail = ImageTk.PhotoImage(thumb_img)
             
-            # Store enhanced capture
+            # Store capture
             self.state_slots.spinner.roi = SpinnerROI(left, top, w, h)
             self.state_slots.spinner.baseline_ready = baseline
             self.state_slots.spinner.ready_color = _avg_rgb(baseline)
@@ -971,7 +1095,7 @@ class SpinHelperApp(tk.Tk):
             self.status.config(text="Universal spinner captured - Ready for automation")
             
             self._log("Universal spinner button READY state captured", green=True)
-            self._log(f"Location: ({x},{y}), ROI: {w}x{h}px", blue=True)
+            self._log(f"Location: ({x},{y}), ROI: {w}x{h}px")
             
         except Exception as e:
             self.spinner_status_var.set("Capture failed")
@@ -979,7 +1103,7 @@ class SpinHelperApp(tk.Tk):
             messagebox.showerror("Capture Error", str(e))
 
     def _capture_fs_native(self):
-        """Native macOS FS area selection"""
+        """Native macOS FS area selection with auto stay-on-top toggle"""
         self._log("Starting native FS area selection...", green=True)
         
         try:
@@ -988,10 +1112,11 @@ class SpinHelperApp(tk.Tk):
                 "Click YES, then:\n"
                 "1. Click and drag to select the Free-Spins banner area\n"
                 "2. The selection will be stored for detection\n\n"
-                "Click NO to cancel.")
+                "Click NO to cancel.\n\n"
+                "Note: Stay-on-top will be temporarily disabled")
             
             if proceed:
-                success = ROISelector.select_roi_native(self)
+                success = ROISelector.select_roi_native(self, auto_toggle_topmost=True)
                 if success:
                     self._log("FS area captured using native selection", green=True)
                 else:
@@ -1003,12 +1128,11 @@ class SpinHelperApp(tk.Tk):
         self.state_slots.detect_fs = self.detect_fs_var.get()
         self._log(f"FS detection: {'ON' if self.state_slots.detect_fs else 'OFF'}")
 
-    # ---------- NEW: Enhanced Target Logic ----------
+    # ---------- Target Logic ----------
 
     def _check_target_reached(self) -> bool:
         """Check if any target limits are reached"""
         try:
-            # Check calculator targets if they exist
             for calc in [getattr(self, 'slots_calculator', None)]:
                 if calc:
                     target_str = calc.target_var.get()
@@ -1036,13 +1160,14 @@ class SpinHelperApp(tk.Tk):
         
         return False
 
-    # ---------- NEW: Enhanced Slots Automation ----------
+    # ---------- Enhanced Slots Automation ----------
 
     def _start_slots(self):
         """Enhanced slots automation with proper state management"""
         if self._running_slots:
-            if self.state_slots.paused_by_mouse:
+            if self.state_slots.paused_by_mouse or self.state_slots.paused_manually:
                 self.state_slots.paused_by_mouse = False
+                self.state_slots.paused_manually = False
                 self._log("Slots automation resumed manually", green=True)
             return
             
@@ -1061,17 +1186,17 @@ class SpinHelperApp(tk.Tk):
         self.slots_pause_btn.config(state=tk.NORMAL)
         self.slots_stop_btn.config(state=tk.NORMAL)
         
-        # Start mouse monitoring
+        # Start monitoring
         self.mouse_monitor.start_monitoring()
         
-        threading.Thread(target=self._enhanced_slots_loop, daemon=True).start()
-        self._log("Enhanced slots automation started with target checking", green=True)
+        threading.Thread(target=self._robust_slots_loop, daemon=True).start()
+        self._log("Enhanced slots automation started with robust spin detection", green=True)
 
     def _pause_slots(self):
         """Manually pause slots automation"""
-        self.state_slots.paused_by_mouse = True
+        self.state_slots.paused_manually = True
         self.slots_start_btn.config(state=tk.NORMAL, text="Resume Auto Spins")
-        self._log("Slots automation manually paused", blue=True)
+        self._log("Slots automation manually paused")
 
     def _stop_slots(self):
         """Stop slots automation"""
@@ -1082,23 +1207,27 @@ class SpinHelperApp(tk.Tk):
         """Reset slots counters and calculations"""
         self.state_slots.total_spins = 0
         self.state_slots.paused_by_mouse = False
+        self.state_slots.paused_manually = False
         self.spin_counter_var.set("0")
         self.slots_start_btn.config(state=tk.NORMAL, text="Start Auto Spins")
         
-        # Reset calculator if it exists
+        # Reset calculator
         if hasattr(self, 'slots_calculator'):
             if hasattr(self.slots_calculator, '_reset'):
                 self.slots_calculator._reset()
         
         self._log("Slots automation reset - counters and calculations cleared")
 
-    def _enhanced_slots_loop(self):
-        """Enhanced slots loop with full state cycle tracking and target checking"""
+    def _robust_slots_loop(self):
+        """Robust slots loop using working August patterns"""
         try:
+            baseline = self.state_slots.spinner.baseline_ready
+            
             while not self._stop_evt.is_set():
-                # Check if paused by mouse movement
-                if self.state_slots.paused_by_mouse:
-                    self.slots_start_btn.config(state=tk.NORMAL, text="Resume Auto Spins")
+                # Check pause states
+                if self.state_slots.paused_by_mouse or self.state_slots.paused_manually:
+                    if self.state_slots.paused_manually:
+                        self.slots_start_btn.config(state=tk.NORMAL, text="Resume Auto Spins")
                     time.sleep(0.5)
                     continue
                 else:
@@ -1109,26 +1238,58 @@ class SpinHelperApp(tk.Tk):
                     self._log("Target reached - stopping automation", green=True)
                     break
                 
-                # Execute spin with enhanced state detection
                 spin_num = self.state_slots.total_spins + 1
-                self._log(f"Executing spin #{spin_num}")
+                self._log(f"Spin #{spin_num} starting...")
+                self.state_slots.spin_started_at = time.time()
                 
-                if self._do_click():
-                    if self.spin_detector.wait_for_spin_cycle():
-                        self.state_slots.total_spins += 1
-                        self.spin_counter_var.set(str(self.state_slots.total_spins))
-                        self._log(f"Spin #{spin_num} completed successfully", green=True)
-                    else:
-                        self._log(f"Spin #{spin_num} cycle timeout - continuing", blue=True)
+                # Use robust detection from August code
+                if not self.spin_detector._ensure_ready_before_click(baseline):
+                    self._log(f"Spin #{spin_num} - timeout waiting READY")
+                    self.state_slots.paused_manually = True
+                    continue
+                
+                if not self.spin_detector.do_click():
+                    self._log(f"Spin #{spin_num} - click failed")
+                    continue
+                
+                if not self.spin_detector._wait_change_sticky(baseline, CHANGE_STICK_MS, timeout=0.9):
+                    self._log(f"Spin #{spin_num} - no visual change, trying rescue")
+                    if not self.spin_detector._rescue_once_then_wait_ready(baseline, wait_after_click=3.0):
+                        self._log(f"Spin #{spin_num} - no visual change after rescue")
+                        continue
+                
+                if not self.spin_detector._wait_for_change(baseline, become_changed=False, timeout=SPIN_CHANGE_TIMEOUT):
+                    self._log(f"Spin #{spin_num} - timeout waiting completion, final rescue")
+                    if not self.spin_detector._rescue_once_then_wait_ready(baseline, wait_after_click=SPIN_CHANGE_TIMEOUT/2):
+                        self._log(f"Spin #{spin_num} - final timeout")
+                        continue
+                
+                # Check spin duration for blip detection
+                dur_ms = int((time.time() - self.state_slots.spin_started_at) * 1000)
+                if dur_ms < MIN_VALID_SPIN_MS:
+                    self._blip_count += 1
+                    if self._blip_count >= MAX_CONSECUTIVE_BLIPS:
+                        self._log(f"Too many short blips - pausing for safety")
+                        self.state_slots.paused_manually = True
+                        self._blip_count = 0
+                        continue
+                    self._log(f"Ignored short blip ({dur_ms} ms)")
+                    time.sleep(0.12)
+                    continue
                 else:
-                    self._log(f"Spin #{spin_num} click failed", blue=True)
+                    self._blip_count = 0
+                
+                # Count successful spin
+                self.state_slots.total_spins += 1
+                self.spin_counter_var.set(str(self.state_slots.total_spins))
+                self._log(f"Spin #{spin_num} complete in {dur_ms} ms", green=True)
                 
                 # Brief pause before next spin
-                if self._stop_evt.wait(random.uniform(0.3, 0.8)):
+                if self._stop_evt.wait(random.uniform(DELAY_MIN, DELAY_MAX)):
                     break
                     
         except Exception as e:
-            self._log(f"Slots automation error: {e}")
+            self._log(f"Slots automation error: {e}", red=True)
         finally:
             self._running_slots = False
             self.mouse_monitor.stop_monitoring()
@@ -1137,107 +1298,106 @@ class SpinHelperApp(tk.Tk):
             self.slots_stop_btn.config(state=tk.DISABLED)
             self._log(f"Slots automation stopped - {self.state_slots.total_spins} spins completed")
 
-    def _do_click(self) -> bool:
-        """Enhanced click with proper error handling"""
-        if not PYAUTOGUI_AVAILABLE or not self.state_slots.spinner.center_xy:
-            return False
+    # ---------- Clicker Functions ----------
+
+    def _clicker_ready(self):
+        """Ready button - positions mouse only, no clicking"""
+        if not self.state_slots.spinner.is_valid:
+            messagebox.showwarning("Setup Required", "Capture spinner button from Environment Setup first.")
+            return
         
+        if not self.state_slots.spinner.center_xy:
+            return
+            
         x, y = self.state_slots.spinner.center_xy
+        
         try:
-            # Small jitter for natural movement
-            jitter_x = random.randint(-1, 1)
-            jitter_y = random.randint(-1, 1)
-            pg.moveTo(x + jitter_x, y + jitter_y, duration=0.05)
-            pg.click()
-            return True
+            if pg:
+                pg.moveTo(x, y, duration=0.1)
+                self._log("Mouse positioned at spinner - YOU must click manually")
         except Exception as e:
-            self._log(f"Click error: {e}")
-            return False
+            self._log(f"Mouse positioning failed: {e}")
 
-    # ---------- Manual Clicker ----------
+    def _clicker_pause_counter(self):
+        """Pause counter (placeholder for manual mode)"""
+        self._log("Counter paused - move mouse away to keep paused")
 
-    def _manual_click(self):
-        """Enhanced manual clicker with state tracking"""
-        if not self.state_slots.spinner.is_valid:
-            messagebox.showwarning("Setup Required", "Capture spinner button from Environment Setup first.")
-            return
-        
-        current = self.ac_manual_done.get()
-        target = self.ac_manual_target.get()
-        
-        if target > 0 and current >= target:
-            self._log("Manual target already reached")
-            return
-        
-        new_count = current + 1
-        self._log(f"Manual click {new_count} executing...")
-        
-        if self._do_click():
-            if self.spin_detector.wait_for_spin_cycle(timeout_s=10.0):
-                self.ac_manual_done.set(new_count)
-                self._log(f"Manual click {new_count} completed", green=True)
-                
-                if target > 0 and new_count >= target:
-                    self._log("Manual target reached!", green=True)
-            else:
-                self._log(f"Manual click {new_count} - cycle timeout")
-        else:
-            self._log(f"Manual click {new_count} - click failed")
+    def _reset_counter(self):
+        """Reset manual counter"""
+        self.clicker_manual_target.set(0)
+        self.clicker_manual_done.set(0)
+        self._log("Manual counter reset")
 
-    def _reset_manual(self):
-        """Reset manual clicker"""
-        self.ac_manual_target.set(0)
-        self.ac_manual_done.set(0)
-        self._log("Manual autoclicker reset")
-
-    # ---------- Automatic Clicker ----------
-
-    def _start_auto(self):
-        """Enhanced automatic clicker"""
-        if self._running_ac:
+    def _start_clicker_auto(self):
+        """Start automatic clicker"""
+        if self._running_clicker:
             return
         if not self.state_slots.spinner.is_valid:
             messagebox.showwarning("Setup Required", "Capture spinner button from Environment Setup first.")
             return
         
-        target = self.ac_auto_target.get()
+        target = self.clicker_auto_target.get()
         if target <= 0:
             messagebox.showwarning("Invalid Target", "Set target > 0.")
             return
         
-        self._running_ac = True
+        self._running_clicker = True
         self._stop_evt.clear()
         
-        self.auto_start_btn.config(state=tk.DISABLED)
-        self.auto_stop_btn.config(state=tk.NORMAL)
+        self.clicker_auto_start_btn.config(state=tk.DISABLED)
+        self.clicker_auto_pause_btn.config(state=tk.NORMAL)
+        self.clicker_auto_stop_btn.config(state=tk.NORMAL)
         
-        threading.Thread(target=self._auto_loop, daemon=True).start()
+        self.mouse_monitor.start_monitoring()
+        
+        threading.Thread(target=self._clicker_auto_loop, daemon=True).start()
         self._log(f"Automatic clicker started - Target: {target}", green=True)
 
-    def _stop_auto(self):
+    def _pause_clicker_auto(self):
+        """Pause automatic clicker"""
+        self.state_slots.paused_manually = True
+        self._log("Automatic clicker paused")
+
+    def _stop_clicker_auto(self):
         """Stop automatic clicker"""
         self._stop_evt.set()
+        self.mouse_monitor.stop_monitoring()
 
-    def _auto_loop(self):
-        """Enhanced automatic clicker loop"""
+    def _clicker_auto_loop(self):
+        """Automatic clicker loop with robust detection"""
         try:
+            baseline = self.state_slots.spinner.baseline_ready
             done = 0
-            target = self.ac_auto_target.get()
+            target = self.clicker_auto_target.get()
             last_waggle = time.time()
             
             while not self._stop_evt.is_set() and done < target:
+                # Check pause states
+                if self.state_slots.paused_by_mouse or self.state_slots.paused_manually:
+                    time.sleep(0.5)
+                    continue
+                
                 done += 1
+                self._log(f"Auto click {done}/{target} starting...")
                 
-                self._log(f"Auto click {done}/{target} executing...")
+                if not self.spin_detector._ensure_ready_before_click(baseline):
+                    self._log(f"Auto click {done}/{target} - timeout waiting READY")
+                    break
                 
-                if self._do_click():
-                    if self.spin_detector.wait_for_spin_cycle():
-                        self.ac_auto_done.set(done)
-                        self._log(f"Auto click {done}/{target} completed", green=True)
-                    else:
-                        self._log(f"Auto click {done}/{target} - cycle timeout")
-                else:
+                if not self.spin_detector.do_click():
                     self._log(f"Auto click {done}/{target} - click failed")
+                    break
+                
+                if not self.spin_detector._wait_change_sticky(baseline, CHANGE_STICK_MS, timeout=0.9):
+                    if not self.spin_detector._rescue_once_then_wait_ready(baseline, wait_after_click=3.0):
+                        self._log(f"Auto click {done}/{target} - no visual change")
+                        continue
+                
+                if self.spin_detector._wait_for_change(baseline, become_changed=False, timeout=SPIN_CHANGE_TIMEOUT):
+                    self.clicker_auto_done.set(done)
+                    self._log(f"Auto click {done}/{target} completed", green=True)
+                else:
+                    self._log(f"Auto click {done}/{target} - completion timeout")
                 
                 # Anti-idle waggle
                 if (self.waggle_on_var.get() and 
@@ -1250,19 +1410,21 @@ class SpinHelperApp(tk.Tk):
                     break
             
             if done >= target:
-                self._log(f"Automatic target reached - {done} clicks completed", green=True)
+                self._log(f"Automatic clicker target reached - {done} clicks completed", green=True)
                 
         except Exception as e:
-            self._log(f"Auto clicker error: {e}")
+            self._log(f"Auto clicker error: {e}", red=True)
         finally:
-            self._running_ac = False
-            self.auto_start_btn.config(state=tk.NORMAL)
-            self.auto_stop_btn.config(state=tk.DISABLED)
+            self._running_clicker = False
+            self.mouse_monitor.stop_monitoring()
+            self.clicker_auto_start_btn.config(state=tk.NORMAL)
+            self.clicker_auto_pause_btn.config(state=tk.DISABLED)
+            self.clicker_auto_stop_btn.config(state=tk.DISABLED)
             self._log("Automatic clicker stopped")
 
     def _perform_waggle(self):
         """Anti-idle waggle movement"""
-        if not PYAUTOGUI_AVAILABLE:
+        if not PYAUTOGUI_AVAILABLE or not self.state_slots.spinner.center_xy:
             return
         try:
             x, y = self.state_slots.spinner.center_xy
@@ -1304,8 +1466,8 @@ class SpinHelperApp(tk.Tk):
 
     # ---------- Logging ----------
 
-    def _log(self, msg, green=False, blue=False):
-        color = "green" if green else ("blue" if blue else None)
+    def _log(self, msg, green=False, blue=False, red=False):
+        color = "green" if green else ("blue" if blue else ("red" if red else None))
         self._log_q.put((msg, color))
 
     def _drain_log(self):
