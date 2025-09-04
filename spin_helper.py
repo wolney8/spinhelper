@@ -1,4 +1,4 @@
-# spin_helper.py — v1.17.7
+# spin_helper.py — v1.17.8
 from __future__ import annotations
 # FIXED: Counter mode click detection, cross-contamination, consistent button behavior
 # FIXED: Slots mouse positioning, proper state isolation between modes
@@ -17,7 +17,7 @@ from typing import Optional, Tuple, List
 from enum import Enum
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 # Import checks
 PIL_AVAILABLE = False
@@ -45,8 +45,9 @@ except ImportError:
 
 # --------------- Constants ---------------
 
-APP_VERSION = "1.17.7"
+APP_VERSION = "1.17.8"
 UI_FLUSH_MS = 60
+SESSIONS_DIR = os.path.join(os.path.expanduser("~"), "spin_helper_sessions")
 
 # Spin detection thresholds
 PIX_DIFF_READY = 4.0
@@ -94,6 +95,13 @@ class AutomationMode(Enum):
     READY = "ready"
     RUNNING = "running" 
     PAUSED = "paused"
+
+class PreClickPhase(Enum):
+    INITIAL_WAIT = "initial_wait"
+    OVERLAY_PROGRESS = "overlay_progress"
+    FS_HOLD = "fs_hold"
+    READY = "ready"
+    TIMEOUT = "timeout"
 
 # --------------- Utility Functions ---------------
 
@@ -262,7 +270,7 @@ class MouseMonitor:
                     
                     if distance > MOUSE_PAUSE_THRESHOLD and not self.state.automation.paused_by_mouse:
                         self.state.automation.paused_by_mouse = True
-                        self.log(f"Auto-paused: mouse moved {distance:.0f}px from spinner")
+                        self.log(f"Auto-paused: mouse moved {distance:.0f}px from spinner", bright_blue=True)
                     elif distance <= MOUSE_PAUSE_THRESHOLD and self.state.automation.paused_by_mouse:
                         self.state.automation.paused_by_mouse = False
                         self.log("Auto-resume: mouse returned to spinner area")
@@ -436,7 +444,97 @@ class BrowserDetector:
 
 class ROISelector:
     @staticmethod
-    def select_roi_native(parent, auto_toggle_topmost=True):
+    def select_roi_overlay(parent, auto_toggle_topmost=True) -> Optional[SpinnerROI]:
+        """Simple in-app ROI selector using a fullscreen translucent overlay.
+
+        Returns SpinnerROI or None if cancelled.
+        """
+        parent_was_topmost = False
+        try:
+            parent_was_topmost = parent.attributes("-topmost")
+            if parent_was_topmost and auto_toggle_topmost:
+                parent.attributes("-topmost", False)
+                parent.update()
+        except Exception:
+            pass
+
+        roi = {"x": None, "y": None, "w": None, "h": None}
+        start = {"x": 0, "y": 0}
+        rect_id = {"id": None}
+
+        overlay = tk.Toplevel(parent)
+        overlay.attributes("-fullscreen", True)
+        overlay.attributes("-topmost", True)
+        try:
+            overlay.overrideredirect(True)
+        except Exception:
+            pass
+
+        canvas = tk.Canvas(overlay, cursor="crosshair", bg="black")
+        canvas.pack(fill=tk.BOTH, expand=True)
+        try:
+            canvas.configure(highlightthickness=0)
+        except Exception:
+            pass
+        canvas.configure(background="#000000")
+        canvas.attributes = getattr(canvas, 'attributes', None)
+
+        w = overlay.winfo_screenwidth()
+        h = overlay.winfo_screenheight()
+        # Semi-transparent veil effect
+        try:
+            overlay.attributes("-alpha", 0.25)
+        except Exception:
+            pass
+
+        def on_press(event):
+            start["x"], start["y"] = event.x, event.y
+            if rect_id["id"] is not None:
+                canvas.delete(rect_id["id"])
+            rect_id["id"] = canvas.create_rectangle(start["x"], start["y"], event.x, event.y, outline="#00ff00", width=2)
+
+        def on_drag(event):
+            if rect_id["id"] is not None:
+                canvas.coords(rect_id["id"], start["x"], start["y"], event.x, event.y)
+
+        def on_release(event):
+            x0, y0 = start["x"], start["y"]
+            x1, y1 = event.x, event.y
+            x, y = min(x0, x1), min(y0, y1)
+            rw, rh = abs(x1 - x0), abs(y1 - y0)
+            if rw >= 10 and rh >= 10:
+                roi.update({"x": x, "y": y, "w": rw, "h": rh})
+            overlay.destroy()
+
+        def on_escape(event):
+            overlay.destroy()
+
+        canvas.bind("<ButtonPress-1>", on_press)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_release)
+        overlay.bind("<Escape>", on_escape)
+        overlay.focus_set()
+        overlay.grab_set()
+        parent.wait_window(overlay)
+
+        try:
+            if parent_was_topmost and auto_toggle_topmost:
+                parent.attributes("-topmost", True)
+                parent.update()
+        except Exception:
+            pass
+
+        if None in roi.values():
+            return None
+        return SpinnerROI(roi["x"], roi["y"], roi["w"], roi["h"])
+
+    @staticmethod
+    def select_roi_native(parent, auto_toggle_topmost=True) -> bool:
+        """Use macOS native interactive screenshot tool to let user select an area.
+
+        Returns True if user made a selection (image saved), False otherwise.
+        Note: This tool does NOT provide coordinates; app will fallback to heuristic ROI.
+        """
         parent_was_topmost = False
         try:
             parent_was_topmost = parent.attributes("-topmost") 
@@ -445,40 +543,24 @@ class ROISelector:
                 parent.update()
         except Exception:
             pass
-            
         try:
             parent.withdraw()
-            
-            messagebox.showinfo("ROI Selection", 
+            messagebox.showinfo("FS Area Selection", 
                 "macOS screenshot selection will open.\n"
-                "Click and drag to select the Free-Spins banner area.\n"
-                "Press Escape to cancel selection.")
-            
-            result = subprocess.run([
-                "screencapture", "-i", "-r", "/tmp/spin_helper_roi_selection.png"
-            ], timeout=60)
-            
-            parent.deiconify()
-            parent.lift()
-            
-            try:
-                if parent_was_topmost and auto_toggle_topmost:
-                    parent.attributes("-topmost", True)
-                    parent.update()
-            except Exception:
-                pass
-            
-            return result.returncode == 0
-            
+                "Click and drag over the slots area, then release.\n"
+                "Press Escape to cancel.")
+            result = subprocess.run(["screencapture", "-i", "-r", "/tmp/spin_helper_fs_area.png"], timeout=120)
         except Exception:
-            parent.deiconify()
+            result = None
+        finally:
             try:
+                parent.deiconify(); parent.lift()
                 if parent_was_topmost and auto_toggle_topmost:
                     parent.attributes("-topmost", True)
                     parent.update()
             except Exception:
                 pass
-            return False
+        return bool(result and result.returncode == 0)
 
 # --------------- Enhanced Calculator Component ---------------
 
@@ -493,6 +575,9 @@ class EmbeddedCalculator:
         self.bet_var = tk.StringVar()
         # Optional direct input for Scenario 1: Total Wager Target
         self.total_target_input_var = tk.StringVar()
+        # Optional policy + balance input
+        self.bonus_first_var = tk.BooleanVar(value=True)
+        self.balance_var = tk.StringVar()
         self.total_var = tk.StringVar(value="—")
         self.target_var = tk.StringVar(value="—")
         self.current_wager_var = tk.StringVar(value="£0.00")
@@ -507,7 +592,7 @@ class EmbeddedCalculator:
         input_frame = ttk.Frame(self.frame)
         input_frame.pack(fill=tk.X)
         
-        ttk.Label(input_frame, text="Amount (£):").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        ttk.Label(input_frame, text="Bonus (£):").grid(row=0, column=0, sticky="w", padx=(0, 5))
         ttk.Entry(input_frame, textvariable=self.amount_var, width=8).grid(row=0, column=1, padx=(0, 10))
         
         ttk.Label(input_frame, text="Wagering ×:").grid(row=0, column=2, sticky="w", padx=(0, 5))
@@ -521,6 +606,17 @@ class EmbeddedCalculator:
         ttk.Entry(input_frame, textvariable=self.total_target_input_var, width=10).grid(row=1, column=1, padx=(0, 10), pady=(6,0))
         ttk.Label(input_frame, text="Tip: Fill Total to compute Wager ×; or leave Total blank to compute Total from Wager ×.")\
             .grid(row=1, column=2, columnspan=4, sticky="w", pady=(6,0))
+
+        # Policy toggle and Balance input
+        policy_frame = ttk.Frame(self.frame)
+        policy_frame.pack(fill=tk.X, pady=(6, 0))
+        ttk.Checkbutton(policy_frame, text="Bonus used before cash (stop using cash when bonus exhausted)",
+                        variable=self.bonus_first_var).pack(side=tk.LEFT)
+
+        balance_frame = ttk.Frame(self.frame)
+        balance_frame.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(balance_frame, text="Balance (£, user-entered):").pack(side=tk.LEFT)
+        ttk.Entry(balance_frame, textvariable=self.balance_var, width=10).pack(side=tk.LEFT, padx=(6, 0))
         
         # Results row
         result_frame = ttk.Frame(self.frame)
@@ -638,6 +734,13 @@ class EmbeddedCalculator:
                 self.app.clicker_auto_target.set(target)
             if hasattr(self.app, 'state_slots'):
                 self.app.state_slots.automation.target_count = target
+
+            # Propagate Balance to current feature's balance field if present
+            bal = getattr(self, 'balance_var', None)
+            if bal is not None:
+                bal_str = bal.get()
+                if hasattr(self.app, 'clicker_balance_var') and bal_str is not None:
+                    self.app.clicker_balance_var.set(bal_str)
             
             self.app._log(f"{self.feature_name} target applied: {target}", green=True)
             
@@ -649,6 +752,8 @@ class EmbeddedCalculator:
         self.mult_var.set("")
         self.bet_var.set("")
         self.total_target_input_var.set("")
+        self.balance_var.set("")
+        self.bonus_first_var.set(True)
         self.total_var.set("—")
         self.target_var.set("—")
         self.current_wager_var.set("£0.00")
@@ -761,7 +866,8 @@ class SpinDetector:
                 time.sleep(0.05)
                 continue
 
-            if allow_grace_click and not grace_clicked and self.state.spinner.center_xy and PYAUTOGUI_AVAILABLE:
+            if (allow_grace_click and not grace_clicked and self.state.spinner.center_xy and PYAUTOGUI_AVAILABLE
+                and not self.state.automation.paused_by_mouse and not self.state.automation.paused_manually):
                 try:
                     x, y = self.state.spinner.center_xy
                     jx = x + random.randint(-JITTER_PX, JITTER_PX)
@@ -786,11 +892,6 @@ class SpinDetector:
             jy = y + random.randint(-JITTER_PX, JITTER_PX)
             pg.moveTo(jx, jy, duration=0.06)
             pg.click()
-            if self.on_actual_click:
-                try:
-                    self.on_actual_click()
-                except Exception:
-                    pass
             self.log("Rescue click #1")
             
             return self._wait_for_change(baseline, become_changed=False, timeout=wait_after_click)
@@ -815,9 +916,13 @@ class SpinDetector:
         try:
             if not PIL_AVAILABLE:
                 return False
-            if not getattr(self.state, 'fs_roi', None) or not getattr(self.state, 'detect_fs', False):
+            if not getattr(self.state, 'detect_fs', False):
                 return False
-            roi = self.state.fs_roi
+            roi = getattr(self.state, 'fs_roi', None)
+            if roi is None:
+                roi = self._derive_slots_roi()
+                if roi is None:
+                    return False
             # Take a few rapid samples and compute average RMS change
             samples = []
             last = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
@@ -830,6 +935,27 @@ class SpinDetector:
             return avg >= FS_ANIM_RMS_ACTIVE
         except Exception:
             return False
+
+    def _derive_slots_roi(self) -> Optional[SpinnerROI]:
+        """Best-effort ROI over the slots area when no explicit FS ROI.
+
+        Heuristic: rectangle up/left of the spinner, sized to typical slots area.
+        """
+        try:
+            if not self.state.spinner.center_xy:
+                return None
+            sx, sy = self.state.spinner.center_xy
+            try:
+                sw, sh = pg.size()
+            except Exception:
+                sw, sh = 1920, 1080
+            width = max(200, int(sw * 0.35))
+            height = max(180, int(sh * 0.40))
+            x = clamp(sx - width - 140, 0, max(0, sw - width))
+            y = clamp(sy - height - 120, 0, max(0, sh - height))
+            return SpinnerROI(x, y, width, height)
+        except Exception:
+            return None
 
     def _click_anywhere_to_continue(self) -> None:
         """Click away from the spin button to advance overlays or prompts.
@@ -854,26 +980,21 @@ class SpinDetector:
                 pass
             pg.moveTo(tx, ty, duration=0.08)
             pg.click()
-            # Note: on_actual_click provided coordinates; guard may decide not to count
-            if self.on_actual_click:
-                try:
-                    self.on_actual_click(tx, ty)
-                except Exception:
-                    pass
             self.log("Overlay-progress click (away from spin)")
         except Exception:
             pass
 
-    def wait_while_fs_active(self, max_seconds: float = 180.0, check_interval: float = 0.5) -> None:
-        """Block while FS/animation area is active according to FS ROI heuristic."""
+    def wait_while_fs_active(self, max_seconds: float = 180.0, check_interval: float = 0.5) -> float:
+        """Block while FS/animation area is active; returns seconds waited."""
         t0 = time.time()
         try:
             while (time.time() - t0) < max_seconds and not self.state.automation.stop_requested:
                 if not self._fs_area_active():
-                    return
+                    break
                 time.sleep(check_interval)
         except Exception:
             pass
+        return time.time() - t0
 
     def ensure_ready_multigrace(self, baseline: Image.Image) -> bool:
         """Wait for READY with multiple pre-click grace attempts.
@@ -886,13 +1007,19 @@ class SpinDetector:
         """
         t0 = time.time()
 
+        phase = PreClickPhase.INITIAL_WAIT
+        self.log(f"Pre-click phase: {phase.value}", orange=True)
         # Initial wait
         if self._wait_for_change(baseline, become_changed=False, timeout=PRE_READY_INITIAL_WAIT):
+            phase = PreClickPhase.READY
+            self.log(f"Pre-click phase: {phase.value}", orange=True)
             return True
 
         clicks = 0
         while (time.time() - t0) < PRE_READY_MAX_TIMEOUT and clicks < PRE_READY_GRACE_CLICKS:
             if self.state.automation.stop_requested:
+                return False
+            if self.state.automation.paused_by_mouse or self.state.automation.paused_manually:
                 return False
 
             # If FS area appears active, wait briefly before attempting a grace click
@@ -901,25 +1028,38 @@ class SpinDetector:
                 time.sleep(0.4)
                 # quick re-check for ready without clicking
                 if self._wait_for_change(baseline, become_changed=False, timeout=0.5):
+                    phase = PreClickPhase.READY
+                    self.log(f"Pre-click phase: {phase.value}", orange=True)
                     return True
 
             # Perform an away-from-spin click to advance overlays/requests for input
+            phase = PreClickPhase.OVERLAY_PROGRESS
+            self.log(f"Pre-click phase: {phase.value} (attempt {clicks + 1})", orange=True)
             self._click_anywhere_to_continue()
 
+            # If paused mid-phase, abort pre-click attempts
+            if self.state.automation.paused_by_mouse or self.state.automation.paused_manually:
+                return False
             # Wait and check READY after the grace click
             if self._wait_for_change(baseline, become_changed=False, timeout=PRE_READY_WAIT_AFTER_CLICK):
                 return True
 
             # If FS area becomes active, wait until it calms down (free spins, big win, etc.)
             if self._fs_area_active():
-                self.log("Pre-click: FS/animation active; waiting for completion")
-                self.wait_while_fs_active()
+                phase = PreClickPhase.FS_HOLD
+                self.log(f"Pre-click phase: {phase.value}", orange=True)
+                waited = self.wait_while_fs_active()
+                self.log(f"Pre-click FS hold waited {waited:.1f}s")
                 # After waiting, re-check READY quickly
                 if self._wait_for_change(baseline, become_changed=False, timeout=2.0):
+                    phase = PreClickPhase.READY
+                    self.log(f"Pre-click phase: {phase.value}", orange=True)
                     return True
 
             clicks += 1
 
+        phase = PreClickPhase.TIMEOUT
+        self.log(f"Pre-click phase: {phase.value}", orange=True)
         return False
 
     def do_click(self, with_jitter: bool = True) -> bool:
@@ -1027,6 +1167,10 @@ class SpinHelperApp(tk.Tk):
         self.topmost_var = tk.BooleanVar(value=current_top)
         ttk.Checkbutton(toolbar, text="Stay on top", variable=self.topmost_var, command=self._apply_topmost).pack(side=tk.LEFT)
 
+        # Session controls
+        ttk.Button(toolbar, text="Save Session", command=self._save_session_dialog).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(toolbar, text="Load Session", command=self._load_session_dialog).pack(side=tk.LEFT, padx=(6, 0))
+
         # Main sections
         self.sections = ttk.Notebook(left_inner)
         self.sections.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -1051,9 +1195,13 @@ class SpinHelperApp(tk.Tk):
         # Log styling
         self.tag_green = "green"
         self.tag_blue = "blue"
+        self.tag_bright_blue = "bright_blue"
+        self.tag_orange = "orange"
         self.tag_red = "red"
         self.log.tag_configure(self.tag_green, foreground="#00a000")
         self.log.tag_configure(self.tag_blue, foreground="#0066cc")
+        self.log.tag_configure(self.tag_bright_blue, foreground="#00aaff")
+        self.log.tag_configure(self.tag_orange, foreground="#ff8c00")
         self.log.tag_configure(self.tag_red, foreground="#cc0000")
 
         # Mouse wheel support
@@ -1132,6 +1280,8 @@ class SpinHelperApp(tk.Tk):
         self.detect_fs_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(fs_controls, text="Detect Free-Spins banner", variable=self.detect_fs_var, command=self._toggle_fs).pack(side=tk.LEFT)
         ttk.Button(fs_controls, text="Select FS Area (Native)", command=self._capture_fs_native).pack(side=tk.LEFT, padx=(20, 0))
+        self.fs_status_var = tk.StringVar(value="No FS ROI selected")
+        ttk.Label(fs_frame, textvariable=self.fs_status_var).pack(anchor='w', pady=(6,0))
         
         # FIXED: Consistent automation controls
         auto_frame = ttk.LabelFrame(tab_slots, text="Automation Controls", padding=8)
@@ -1298,6 +1448,13 @@ class SpinHelperApp(tk.Tk):
         ttk.Label(wager_frame, textvariable=self.clicker_auto_wager_var, font=('Monaco', 10, 'bold'),
                  foreground="white").pack(side=tk.LEFT, padx=(6, 0))
 
+        # User-entered Balance (advisory)
+        self.clicker_balance_var = tk.StringVar(value="")
+        balance_frame = ttk.Frame(auto_frame)
+        balance_frame.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(balance_frame, text="Balance (£, user-entered):").pack(side=tk.LEFT)
+        ttk.Entry(balance_frame, textvariable=self.clicker_balance_var, width=10).pack(side=tk.LEFT, padx=(6, 0))
+
         # Waggle controls (shared settings; ensure initialized)
         if not hasattr(self, 'waggle_on_var'):
             self.waggle_on_var = tk.BooleanVar(value=AC_DEFAULT_WAGGLE_ON)
@@ -1392,25 +1549,19 @@ class SpinHelperApp(tk.Tk):
             messagebox.showerror("Capture Error", str(e))
 
     def _capture_fs_native(self):
-        self._log("Starting native FS area selection...", green=True)
-        
+        self._log("Starting FS area selection (native)...", green=True)
         try:
-            proceed = messagebox.askyesno("FS Area Selection", 
-                "This will use the native macOS screenshot tool.\n\n"
-                "Click YES, then:\n"
-                "1. Click and drag to select the Free-Spins banner area\n"
-                "2. The selection will be stored for detection\n\n"
-                "Click NO to cancel.\n\n"
-                "Note: Stay-on-top will be temporarily disabled")
-            
-            if proceed:
-                success = ROISelector.select_roi_native(self, auto_toggle_topmost=True)
-                if success:
-                    self._log("FS area captured using native selection", green=True)
-                else:
-                    self._log("FS area selection cancelled")
+            success = ROISelector.select_roi_native(self, auto_toggle_topmost=True)
+            if success:
+                # We cannot get coordinates from native tool; use heuristic ROI at runtime
+                self.state_slots.fs_roi = None
+                self.fs_status_var.set("FS area selected (native). Using heuristic ROI at runtime.")
+                self._log("FS area selected via native tool (heuristic ROI runtime)", green=True)
+                self._save_geometry()
+            else:
+                self._log("FS area selection cancelled")
         except Exception as e:
-            self._log(f"Native FS selection error: {e}")
+            self._log(f"FS selection error: {e}")
 
     def _toggle_fs(self):
         self.state_slots.detect_fs = self.detect_fs_var.get()
@@ -1430,7 +1581,7 @@ class SpinHelperApp(tk.Tk):
         self.click_detector.stop_monitoring()
         self.mouse_monitor.stop_monitoring()
         
-        self._log("All automation modes stopped")
+        self._log("All automation modes stopped", bright_blue=True)
 
     def _position_mouse_with_grace(self, mode_name: str) -> bool:
         """Common function to position mouse and apply grace period"""
@@ -1507,7 +1658,7 @@ class SpinHelperApp(tk.Tk):
         """Pause slots at next ready position"""
         self.state_slots.automation.paused_manually = True
         self.slots_ready_btn.config(state=tk.NORMAL, text="Ready")
-        self._log("Slots: Pause requested - will pause at next ready position")
+        self._log("Slots: Pause requested - will pause at next ready position", bright_blue=True)
 
     def _slots_stop_reset(self):
         """Stop slots and reset counters (not calculator)"""
@@ -1524,7 +1675,7 @@ class SpinHelperApp(tk.Tk):
         self.slots_ready_btn.config(state=tk.NORMAL, text="Ready")
         self.slots_pause_btn.config(state=tk.DISABLED)
         
-        self._log("Slots: Stop/Reset - counters cleared, calculator preserved")
+        self._log("Slots: Stop/Reset - counters cleared, calculator preserved", bright_blue=True)
 
     def _slots_automation_loop(self):
         """Slots automation loop with robust detection"""
@@ -1591,7 +1742,7 @@ class SpinHelperApp(tk.Tk):
             self.mouse_monitor.stop_monitoring()
             self.slots_ready_btn.config(state=tk.NORMAL, text="Ready")
             self.slots_pause_btn.config(state=tk.DISABLED)
-            self._log("Slots automation stopped")
+            self._log("Slots automation stopped", bright_blue=True)
 
     # ---------- FIXED: Counter Mode ----------
 
@@ -1624,7 +1775,7 @@ class SpinHelperApp(tk.Tk):
         self.counter_ready_btn.config(state=tk.NORMAL, text="Ready")
         self.counter_pause_btn.config(state=tk.DISABLED)
         
-        self._log("Counter: Paused - click detection stopped")
+        self._log("Counter: Paused - click detection stopped", bright_blue=True)
 
     def _counter_stop_reset(self):
         """Stop counter and reset counters (not calculator)"""
@@ -1640,7 +1791,7 @@ class SpinHelperApp(tk.Tk):
         self.counter_ready_btn.config(state=tk.NORMAL, text="Ready")
         self.counter_pause_btn.config(state=tk.DISABLED)
         
-        self._log("Counter: Stop/Reset - counters cleared, calculator preserved")
+        self._log("Counter: Stop/Reset - counters cleared, calculator preserved", bright_blue=True)
 
     # ---------- FIXED: Automatic Mode ----------
 
@@ -1680,7 +1831,7 @@ class SpinHelperApp(tk.Tk):
         """Pause automatic mode"""
         self.state_slots.automation.paused_manually = True
         self.auto_ready_btn.config(state=tk.NORMAL, text="Ready")
-        self._log("Automatic: Pause requested - will pause at next ready position")
+        self._log("Automatic: Pause requested - will pause at next ready position", bright_blue=True)
 
     def _auto_stop_reset(self):
         """Stop automatic and reset counters (not calculator)"""
@@ -1698,7 +1849,7 @@ class SpinHelperApp(tk.Tk):
         self.auto_ready_btn.config(state=tk.NORMAL, text="Ready")
         self.auto_pause_btn.config(state=tk.DISABLED)
         
-        self._log("Automatic: Stop/Reset - counters cleared, calculator preserved")
+        self._log("Automatic: Stop/Reset - counters cleared, calculator preserved", bright_blue=True)
 
     def _auto_automation_loop(self):
         """Automatic clicker loop"""
@@ -1738,6 +1889,18 @@ class SpinHelperApp(tk.Tk):
                     self.clicker_auto_done.set(done)
                     elapsed_ms = (time.time() - t_start) * 1000.0
                     self._log(f"Automatic: Click #{done}/{target} completed in {elapsed_ms:.0f} ms", green=True)
+                    # Guardrail: stop at wager target if reached (from Clicker calculator)
+                    try:
+                        total_str = self.clicker_calculator.total_var.get()
+                        bet = float(self.clicker_calculator.bet_var.get() or "0")
+                        if total_str and total_str != "—" and bet > 0:
+                            total_target = float(total_str.replace("£",""))
+                            current = done * bet
+                            if total_target > 0 and current >= total_target:
+                                self._log(f"Automatic: Wager target reached £{current:.2f}/£{total_target:.2f} — stopping", green=True)
+                                break
+                    except Exception:
+                        pass
                 else:
                     self._log(f"Automatic: Click #{done} - completion timeout")
                 
@@ -1752,6 +1915,10 @@ class SpinHelperApp(tk.Tk):
             
             if done >= target:
                 self._log(f"Automatic: Target reached - {done} clicks completed", green=True)
+                try:
+                    self._auto_save_session("auto_target")
+                except Exception:
+                    pass
                 
         except Exception as e:
             self._log(f"Automatic clicker error: {e}", red=True)
@@ -1760,7 +1927,7 @@ class SpinHelperApp(tk.Tk):
             self.mouse_monitor.stop_monitoring()
             self.auto_ready_btn.config(state=tk.NORMAL, text="Ready")
             self.auto_pause_btn.config(state=tk.DISABLED)
-            self._log("Automatic clicker stopped")
+            self._log("Automatic clicker stopped", bright_blue=True)
 
     def _perform_waggle(self):
         """Anti-idle waggle movement"""
@@ -1787,6 +1954,10 @@ class SpinHelperApp(tk.Tk):
                 target_spins = int(target_str)
                 if target_spins > 0 and self.state_slots.automation.total_done >= target_spins:
                     self._log(f"Slots target reached: {self.state_slots.automation.total_done}/{target_spins}", green=True)
+                    try:
+                        self._auto_save_session("slots_target")
+                    except Exception:
+                        pass
                     return True
             
             # Check wager target
@@ -1799,6 +1970,10 @@ class SpinHelperApp(tk.Tk):
                     current_wager = self.state_slots.automation.total_done * bet_per_spin
                     if target_wager > 0 and current_wager >= target_wager:
                         self._log(f"Slots wager target reached: £{current_wager:.2f}/£{target_wager:.2f}", green=True)
+                        try:
+                            self._auto_save_session("slots_wager")
+                        except Exception:
+                            pass
                         return True
                 except:
                     pass
@@ -1814,13 +1989,26 @@ class SpinHelperApp(tk.Tk):
                 data = json.load(f)
             self.geometry(data.get("geom", "1000x600"))
             self.attributes("-topmost", bool(data.get("topmost", True)))
+            # Restore FS ROI if present
+            fs = data.get("fs_roi")
+            if fs and all(k in fs for k in ("x","y","w","h")):
+                try:
+                    self.state_slots.fs_roi = SpinnerROI(int(fs["x"]), int(fs["y"]), int(fs["w"]), int(fs["h"]))
+                    if hasattr(self, 'fs_status_var'):
+                        self.fs_status_var.set(f"FS ROI set at ({fs['x']},{fs['y']}) {fs['w']}x{fs['h']}")
+                except Exception:
+                    pass
         except Exception:
             pass
 
     def _save_geometry(self):
         cfg = os.path.join(os.path.expanduser("~"), ".spin_helper_geometry.json")
         try:
-            data = {"geom": self.geometry(), "topmost": bool(self.topmost_var.get())}
+            fs_roi = None
+            if getattr(self.state_slots, 'fs_roi', None):
+                fs = self.state_slots.fs_roi
+                fs_roi = {"x": fs.x, "y": fs.y, "w": fs.w, "h": fs.h}
+            data = {"geom": self.geometry(), "topmost": bool(self.topmost_var.get()), "fs_roi": fs_roi}
             with open(cfg, "w") as f:
                 json.dump(data, f)
         except Exception:
@@ -1833,10 +2021,219 @@ class SpinHelperApp(tk.Tk):
         except Exception:
             pass
 
+    # ---------- Session Save/Load ----------
+
+    def _ensure_sessions_dir(self):
+        try:
+            os.makedirs(SESSIONS_DIR, exist_ok=True)
+        except Exception:
+            pass
+
+    def _get_log_tail(self, lines: int = 60) -> list:
+        try:
+            content = self.log.get("1.0", tk.END)
+            arr = [ln for ln in content.splitlines() if ln.strip()]
+            return arr[-lines:]
+        except Exception:
+            return []
+
+    def _calc_to_dict(self, calc) -> dict:
+        if not calc:
+            return {}
+        d = {}
+        for name in [
+            "amount_var", "mult_var", "bet_var", "total_target_input_var", "total_var",
+            "target_var", "current_wager_var", "balance_var", "bonus_first_var",
+        ]:
+            if hasattr(calc, name):
+                var = getattr(calc, name)
+                try:
+                    d[name] = var.get() if hasattr(var, 'get') else None
+                except Exception:
+                    d[name] = None
+        return d
+
+    def _collect_session(self) -> dict:
+        data = {
+            "version": APP_VERSION,
+            "ts": time.time(),
+            "spinner": None,
+            "fs_roi": None,
+            "detect_fs": bool(getattr(self.state_slots, 'detect_fs', False)),
+            "slots": {
+                "spins_done": int(getattr(self.state_slots.automation, 'total_done', 0)),
+                "target": int(getattr(self.state_slots.automation, 'target_count', 0)),
+                "actual_clicks": int(getattr(self.state_slots.automation, 'actual_clicks', 0)),
+            },
+            "clicker": {
+                "manual": {
+                    "target": int(getattr(self, 'clicker_manual_target', tk.IntVar(value=0)).get()) if hasattr(self, 'clicker_manual_target') else 0,
+                    "done": int(getattr(self, 'clicker_manual_done', tk.IntVar(value=0)).get()) if hasattr(self, 'clicker_manual_done') else 0,
+                    "actual_clicks": int(getattr(self, 'clicker_manual_actual_clicks', tk.IntVar(value=0)).get()) if hasattr(self, 'clicker_manual_actual_clicks') else 0,
+                },
+                "automatic": {
+                    "target": int(getattr(self, 'clicker_auto_target', tk.IntVar(value=0)).get()) if hasattr(self, 'clicker_auto_target') else 0,
+                    "done": int(getattr(self, 'clicker_auto_done', tk.IntVar(value=0)).get()) if hasattr(self, 'clicker_auto_done') else 0,
+                    "actual_clicks": int(getattr(self, 'clicker_auto_actual_clicks', tk.IntVar(value=0)).get()) if hasattr(self, 'clicker_auto_actual_clicks') else 0,
+                    "balance": getattr(self, 'clicker_balance_var', tk.StringVar(value="")).get() if hasattr(self, 'clicker_balance_var') else "",
+                    "current_wager": getattr(self, 'clicker_auto_wager_var', tk.StringVar(value="£0.00")).get() if hasattr(self, 'clicker_auto_wager_var') else "£0.00",
+                },
+            },
+            "calculators": {
+                "slots": self._calc_to_dict(getattr(self, 'slots_calculator', None)),
+                "roulette": self._calc_to_dict(getattr(self, 'roulette_calculator', None)),
+                "clicker": self._calc_to_dict(getattr(self, 'clicker_calculator', None)),
+            },
+            "logs_tail": self._get_log_tail(60),
+        }
+        sp = getattr(self.state_slots, 'spinner', None)
+        if sp and sp.center_xy:
+            data["spinner"] = {
+                "center_xy": list(sp.center_xy),
+                "roi": {"x": sp.roi.x, "y": sp.roi.y, "w": sp.roi.w, "h": sp.roi.h} if sp.roi else None,
+            }
+        if getattr(self.state_slots, 'fs_roi', None):
+            r = self.state_slots.fs_roi
+            data["fs_roi"] = {"x": r.x, "y": r.y, "w": r.w, "h": r.h}
+        return data
+
+    def _apply_session(self, data: dict):
+        try:
+            # Restore calculators
+            def set_var(container, name, value):
+                try:
+                    if hasattr(container, name) and value is not None:
+                        v = getattr(container, name)
+                        if hasattr(v, 'set'):
+                            v.set(value)
+                except Exception:
+                    pass
+
+            calcs = data.get("calculators", {})
+            if calcs:
+                if hasattr(self, 'slots_calculator'):
+                    for k, v in calcs.get("slots", {}).items():
+                        set_var(self.slots_calculator, k, v)
+                if hasattr(self, 'roulette_calculator'):
+                    for k, v in calcs.get("roulette", {}).items():
+                        set_var(self.roulette_calculator, k, v)
+                if hasattr(self, 'clicker_calculator'):
+                    for k, v in calcs.get("clicker", {}).items():
+                        set_var(self.clicker_calculator, k, v)
+
+            # Restore clicker fields
+            cl = data.get("clicker", {})
+            if cl:
+                man = cl.get("manual", {})
+                if hasattr(self, 'clicker_manual_target'): self.clicker_manual_target.set(int(man.get("target", 0)))
+                if hasattr(self, 'clicker_manual_done'): self.clicker_manual_done.set(int(man.get("done", 0)))
+                if hasattr(self, 'clicker_manual_actual_clicks'): self.clicker_manual_actual_clicks.set(int(man.get("actual_clicks", 0)))
+                aut = cl.get("automatic", {})
+                if hasattr(self, 'clicker_auto_target'): self.clicker_auto_target.set(int(aut.get("target", 0)))
+                if hasattr(self, 'clicker_auto_done'): self.clicker_auto_done.set(int(aut.get("done", 0)))
+                if hasattr(self, 'clicker_auto_actual_clicks'): self.clicker_auto_actual_clicks.set(int(aut.get("actual_clicks", 0)))
+                if hasattr(self, 'clicker_balance_var'): self.clicker_balance_var.set(aut.get("balance", ""))
+                if hasattr(self, 'clicker_auto_wager_var'): self.clicker_auto_wager_var.set(aut.get("current_wager", "£0.00"))
+
+            # Restore slots counters
+            slots = data.get("slots", {})
+            self.state_slots.automation.total_done = int(slots.get("spins_done", 0))
+            self.state_slots.automation.target_count = int(slots.get("target", 0))
+            self.state_slots.automation.actual_clicks = int(slots.get("actual_clicks", 0))
+            if hasattr(self, 'slots_counter_var'):
+                self.slots_counter_var.set(str(self.state_slots.automation.total_done))
+            if hasattr(self, 'slots_actual_clicks_var'):
+                self.slots_actual_clicks_var.set(str(self.state_slots.automation.actual_clicks))
+
+            # Restore FS detection + ROI
+            self.state_slots.detect_fs = bool(data.get("detect_fs", self.state_slots.detect_fs))
+            fsr = data.get("fs_roi")
+            if fsr and all(k in fsr for k in ("x","y","w","h")):
+                try:
+                    self.state_slots.fs_roi = SpinnerROI(int(fsr['x']), int(fsr['y']), int(fsr['w']), int(fsr['h']))
+                    if hasattr(self, 'fs_status_var'):
+                        self.fs_status_var.set(f"FS ROI set at ({fsr['x']},{fsr['y']}) {fsr['w']}x{fsr['h']}")
+                except Exception:
+                    pass
+
+            # Restore spinner geometry only (force re-capture of baseline)
+            sp = data.get("spinner")
+            if sp and sp.get('roi') and sp.get('center_xy'):
+                try:
+                    roi = sp['roi']
+                    self.state_slots.spinner.roi = SpinnerROI(int(roi['x']), int(roi['y']), int(roi['w']), int(roi['h']))
+                    self.state_slots.spinner.center_xy = tuple(sp['center_xy'])
+                    self.state_slots.spinner.is_valid = False
+                    self.state_slots.spinner.baseline_ready = None
+                    if hasattr(self, 'spinner_status_var'):
+                        self.spinner_status_var.set("Spinner geometry loaded — please Capture Spinner before starting")
+                except Exception:
+                    pass
+
+            # Append last log lines for context
+            for ln in data.get("logs_tail", [])[-10:]:
+                self._log(f"[session] {ln}", blue=True)
+
+            self._log("Session loaded. Verify spinner capture and browser selection before starting.", bright_blue=True)
+        except Exception as e:
+            self._log(f"Session load error: {e}", red=True)
+
+    def _save_session_dialog(self):
+        try:
+            self._ensure_sessions_dir()
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            default = os.path.join(SESSIONS_DIR, f"session_{ts}.json")
+            path = filedialog.asksaveasfilename(initialfile=os.path.basename(default), initialdir=SESSIONS_DIR, defaultextension=".json", filetypes=[["JSON","*.json"]])
+            if not path:
+                return
+            data = self._collect_session()
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+            self._log(f"Session saved to {path}", bright_blue=True)
+        except Exception as e:
+            self._log(f"Session save error: {e}", red=True)
+
+    def _load_session_dialog(self):
+        try:
+            self._ensure_sessions_dir()
+            path = filedialog.askopenfilename(initialdir=SESSIONS_DIR, filetypes=[["JSON","*.json"]])
+            if not path:
+                return
+            with open(path, 'r') as f:
+                data = json.load(f)
+            self._apply_session(data)
+            self._log(f"Loaded session from {path}", bright_blue=True)
+        except Exception as e:
+            self._log(f"Session load error: {e}", red=True)
+
+    def _auto_save_session(self, reason: str = ""):
+        try:
+            self._ensure_sessions_dir()
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            suffix = f"_{reason}" if reason else ""
+            path = os.path.join(SESSIONS_DIR, f"autosave_{ts}{suffix}.json")
+            data = self._collect_session()
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+            self._log(f"Session auto-saved: {path}", bright_blue=True)
+        except Exception:
+            pass
+
     # ---------- Logging ----------
 
-    def _log(self, msg, green=False, blue=False, red=False):
-        color = "green" if green else ("blue" if blue else ("red" if red else None))
+    def _log(self, msg, green=False, blue=False, red=False, orange=False, bright_blue=False):
+        if orange:
+            color = self.tag_orange
+        elif bright_blue:
+            color = self.tag_bright_blue
+        elif green:
+            color = self.tag_green
+        elif blue:
+            color = self.tag_blue
+        elif red:
+            color = self.tag_red
+        else:
+            color = None
         self._log_q.put((msg, color))
 
     def _drain_log(self):
