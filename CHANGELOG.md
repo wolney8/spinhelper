@@ -377,12 +377,24 @@ Quality-of-life controls and static-button detection improvements.
 ### Added
 - Overlay handling control: toggle to "Suppress auto-pause during overlay handling" with configurable suppression duration.
 - Session name indicator in toolbar.
+- Infinite wait toggle: optionally wait indefinitely for READY after a click (Slots/Automatic).
+- Auto-save on target toggle (default OFF) in Environment.
+- Consistent "Current Wager" readout added to Slots and Counter; updates every second.
 
 ### Changed
 - Auxiliary ROI captured beneath spinner and used in readiness checks to better detect "spin in progress" on static spin buttons.
 - Stop/Reset buttons styled red/white for clarity; calculators use blue background.
+- Post-click validation requires true NOT_READY → READY cycle to count a spin (prevents false completions after pause/resume or animations).
+- Rescue/grace clicks are performed away from the spinner and never counted.
+- Away-from-spin clicks prefer the slots ROI area to avoid large pointer swings.
 
 ### Fixed
 - Reduced false auto-pauses during intentional overlay clicks by suppressing mouse-based pause for the configured duration.
+- Pause semantics: pre-click waits for READY when paused, then yields control without moving the cursor; loops hold until unpaused.
+- Indentation hotfix in Slots target auto-save try/except (prevents runtime error when starting the app).
+- Automatic first-click stability: overlay clicks no longer target other monitors; clicks occur near the spinner, and topmost is temporarily dropped to ensure the browser receives them.
+- Strict post-click validation in Slots/Automatic requires NOT_READY → READY before incrementing spins; prevents false completions.
+- Progress preservation: Automatic resumes counting from the previous Done value unless Stop/Reset is used.
+- Consistent Current Wager layout and naming across Slots, Counter, and Automatic.
 
 ---
