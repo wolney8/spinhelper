@@ -1,4 +1,4 @@
-# spin_helper.py — v1.17.8
+# spin_helper.py — v1.17.9
 from __future__ import annotations
 # FIXED: Counter mode click detection, cross-contamination, consistent button behavior
 # FIXED: Slots mouse positioning, proper state isolation between modes
@@ -17,7 +17,7 @@ from typing import Optional, Tuple, List
 from enum import Enum
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 # Import checks
 PIL_AVAILABLE = False
@@ -45,7 +45,7 @@ except ImportError:
 
 # --------------- Constants ---------------
 
-APP_VERSION = "1.17.8"
+APP_VERSION = "1.17.9"
 UI_FLUSH_MS = 60
 SESSIONS_DIR = os.path.join(os.path.expanduser("~"), "spin_helper_sessions")
 
@@ -145,6 +145,8 @@ class SpinnerROI:
 class SpinnerCapture:
     roi: Optional[SpinnerROI] = None
     baseline_ready: Optional[Image.Image] = None
+    aux_roi: Optional[SpinnerROI] = None
+    aux_baseline_ready: Optional[Image.Image] = None
     ready_color: Optional[Tuple[float, float, float]] = None
     ready_brightness: Optional[float] = None
     center_xy: Optional[Tuple[int, int]] = None
@@ -162,6 +164,7 @@ class AutomationState:
     stop_requested: bool = False
     last_mouse_pos: Optional[Tuple[int,int]] = None
     actual_clicks: int = 0
+    suppress_mouse_pause_until: float = 0.0
     
 @dataclass
 class SessionStateSlots:
@@ -169,6 +172,8 @@ class SessionStateSlots:
     fs_roi: Optional[SpinnerROI] = None
     detect_fs: bool = True
     automation: AutomationState = None
+    suppress_overlay_pause: bool = True
+    suppress_overlay_secs: float = 11.0
     
     def __post_init__(self):
         if self.spinner is None:
@@ -268,6 +273,11 @@ class MouseMonitor:
                     sx, sy = self.state.spinner.center_xy
                     distance = math.sqrt((current_pos[0] - sx)**2 + (current_pos[1] - sy)**2)
                     
+                    # Suppress auto-pause during intentional away-from-spin overlay clicks
+                    if time.time() < getattr(self.state.automation, 'suppress_mouse_pause_until', 0):
+                        time.sleep(MOUSE_CHECK_INTERVAL)
+                        continue
+
                     if distance > MOUSE_PAUSE_THRESHOLD and not self.state.automation.paused_by_mouse:
                         self.state.automation.paused_by_mouse = True
                         self.log(f"Auto-paused: mouse moved {distance:.0f}px from spinner", bright_blue=True)
@@ -568,7 +578,7 @@ class EmbeddedCalculator:
     def __init__(self, parent, app_instance, feature_name):
         self.app = app_instance
         self.feature_name = feature_name
-        self.frame = ttk.LabelFrame(parent, text=f"{feature_name} Target Calculator", padding=8)
+        self.frame = ttk.LabelFrame(parent, text=f"{feature_name} Target Calculator", padding=8, style='Calc.TLabelframe')
         
         self.amount_var = tk.StringVar()
         self.mult_var = tk.StringVar()
@@ -780,6 +790,12 @@ class SpinDetector:
         try:
             current = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
             rms = _rms(current, spinner.baseline_ready)
+            # Auxiliary check: if aux ROI captured, treat large change as NOT_READY
+            if spinner.aux_roi and spinner.aux_baseline_ready is not None:
+                aux = ImageGrab.grab(bbox=(spinner.aux_roi.x, spinner.aux_roi.y, spinner.aux_roi.x + spinner.aux_roi.w, spinner.aux_roi.y + spinner.aux_roi.h))
+                aux_diff = _rms(aux, spinner.aux_baseline_ready)
+                if aux_diff >= PIX_DIFF_CHANGED:
+                    return SpinState.NOT_READY
             
             if rms <= PIX_DIFF_READY:
                 return SpinState.READY
@@ -818,22 +834,15 @@ class SpinDetector:
 
     def _wait_for_change(self, baseline: Image.Image, become_changed=True, timeout=SPIN_CHANGE_TIMEOUT) -> bool:
         t0 = time.time()
-        
         while time.time() - t0 < timeout:
             if self.state.automation.stop_requested:
                 return False
-                
-            roi = self.state.spinner.roi
-            current = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
-            diff = _rms(current, baseline)
-            
-            if become_changed and diff >= PIX_DIFF_CHANGED:
+            state = self.get_current_state()
+            if become_changed and state == SpinState.NOT_READY:
                 return True
-            if not become_changed and diff <= PIX_DIFF_READY:
+            if not become_changed and state == SpinState.READY:
                 return True
-                
             time.sleep(0.05)
-            
         return False
 
     def wait_ready_with_grace(self, baseline: Image.Image,
@@ -976,6 +985,11 @@ class SpinDetector:
                 sw, sh = pg.size()
                 tx = clamp(tx, 10, sw - 10)
                 ty = clamp(ty, 10, sh - 10)
+            except Exception:
+                pass
+            # Suppress auto-pause during this intentional away-from-spin movement
+            try:
+                self.state.automation.suppress_mouse_pause_until = time.time() + PRE_READY_WAIT_AFTER_CLICK + 0.5
             except Exception:
                 pass
             pg.moveTo(tx, ty, duration=0.08)
@@ -1121,6 +1135,10 @@ class SpinHelperApp(tk.Tk):
         self.waggle_secs_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_SECS)
         self.waggle_amp_var = tk.IntVar(value=AC_DEFAULT_WAGGLE_AMP)
 
+        # Overlay handling suppression controls (UI vars)
+        self.overlay_suppress_var = tk.BooleanVar(value=bool(self.state_slots.suppress_overlay_pause))
+        self.overlay_suppress_secs_var = tk.DoubleVar(value=float(self.state_slots.suppress_overlay_secs))
+
         # UI counters for Actual Clicks per mode
         self.slots_actual_clicks_var = tk.StringVar(value="0")
         self.clicker_manual_actual_clicks = tk.IntVar(value=0)
@@ -1169,7 +1187,9 @@ class SpinHelperApp(tk.Tk):
 
         # Session controls
         ttk.Button(toolbar, text="Save Session", command=self._save_session_dialog).pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Button(toolbar, text="Load Session", command=self._load_session_dialog).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(toolbar, text="Load Session", command=self._load_session_dialog).pack(side=tk.LEFT, padx=(6, 8))
+        self.session_name_var = tk.StringVar(value="No session loaded")
+        ttk.Label(toolbar, textvariable=self.session_name_var).pack(side=tk.LEFT)
 
         # Main sections
         self.sections = ttk.Notebook(left_inner)
@@ -1191,6 +1211,16 @@ class SpinHelperApp(tk.Tk):
         # Status bar
         self.status = ttk.Label(self, text="Ready - Select browser window and capture spinner")
         self.status.pack(fill=tk.X)
+
+        # Widget styles
+        style = ttk.Style(self)
+        try:
+            style.configure('Danger.TButton', foreground='white', background='#cc0000')
+            style.map('Danger.TButton', background=[('active', '#b30000')])
+            style.configure('Calc.TLabelframe', background='#4a86e8')
+            style.configure('Calc.TLabelframe.Label', background='#4a86e8', foreground='white')
+        except Exception:
+            pass
 
         # Log styling
         self.tag_green = "green"
@@ -1266,6 +1296,14 @@ class SpinHelperApp(tk.Tk):
         info_text += "Consistent Ready/Pause/Stop behavior across all features"
         ttk.Label(sys_frame, text=info_text, justify=tk.LEFT).pack(anchor='w')
 
+        # Overlay handling controls
+        overlay_frame = ttk.LabelFrame(tab_env, text="Overlay Handling", padding=10)
+        overlay_frame.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Checkbutton(overlay_frame, text="Suppress auto-pause during overlay handling",
+                        variable=self.overlay_suppress_var, command=self._apply_overlay_settings).pack(side=tk.LEFT)
+        ttk.Label(overlay_frame, text="for (sec):").pack(side=tk.LEFT, padx=(10, 4))
+        ttk.Entry(overlay_frame, textvariable=self.overlay_suppress_secs_var, width=6).pack(side=tk.LEFT)
+
     def _build_slots_tab(self):
         tab_slots = ttk.Frame(self.sections)
         self.sections.add(tab_slots, text="Slots (auto)")
@@ -1297,7 +1335,7 @@ class SpinHelperApp(tk.Tk):
         self.slots_pause_btn = ttk.Button(auto_controls, text="Pause", command=self._slots_pause, state=tk.DISABLED)
         self.slots_pause_btn.pack(side=tk.LEFT, padx=(0, 5))
         
-        self.slots_stop_btn = ttk.Button(auto_controls, text="Stop/Reset", command=self._slots_stop_reset)
+        self.slots_stop_btn = ttk.Button(auto_controls, text="Stop/Reset", command=self._slots_stop_reset, style='Danger.TButton')
         self.slots_stop_btn.pack(side=tk.LEFT)
         
         # Spin counter display
@@ -1397,13 +1435,23 @@ class SpinHelperApp(tk.Tk):
         self.counter_pause_btn = ttk.Button(counter_controls, text="Pause", command=self._counter_pause, state=tk.DISABLED)
         self.counter_pause_btn.grid(row=0, column=5, padx=(0, 5))
         
-        self.counter_stop_btn = ttk.Button(counter_controls, text="Stop/Reset", command=self._counter_stop_reset)
+        self.counter_stop_btn = ttk.Button(counter_controls, text="Stop/Reset", command=self._counter_stop_reset, style='Danger.TButton')
         self.counter_stop_btn.grid(row=0, column=6)
 
         # Actual clicks under Spins Completed
         ttk.Label(counter_controls, text="Actual Clicks:").grid(row=1, column=2, sticky="w", pady=(4,0))
         ttk.Label(counter_controls, textvariable=self.clicker_manual_actual_clicks, font=('Monaco', 10, 'bold'),
                  foreground="white").grid(row=1, column=3, padx=(5, 15), pady=(4,0))
+
+        # Current Wager for Counter (manual)
+        manual_wager_frame_ct = ttk.Frame(counter_tab)
+        manual_wager_frame_ct.pack(fill=tk.X, padx=8, pady=(6, 0))
+        ttk.Label(manual_wager_frame_ct, text="Current Wager (Manual):").pack(side=tk.LEFT)
+        # Reuse shared variable created in Automatic section if available; ensure it exists
+        if not hasattr(self, 'clicker_manual_wager_var'):
+            self.clicker_manual_wager_var = tk.StringVar(value="£0.00")
+        ttk.Label(manual_wager_frame_ct, textvariable=self.clicker_manual_wager_var, font=('Monaco', 10, 'bold'),
+                 foreground="white").pack(side=tk.LEFT, padx=(6, 0))
         
         # Automatic mode
         auto_tab = ttk.Frame(self.clicker_notebook)
@@ -1432,7 +1480,7 @@ class SpinHelperApp(tk.Tk):
         self.auto_pause_btn = ttk.Button(auto_controls, text="Pause", command=self._auto_pause, state=tk.DISABLED)
         self.auto_pause_btn.grid(row=0, column=5, padx=(0, 5))
         
-        self.auto_stop_btn = ttk.Button(auto_controls, text="Stop/Reset", command=self._auto_stop_reset)
+        self.auto_stop_btn = ttk.Button(auto_controls, text="Stop/Reset", command=self._auto_stop_reset, style='Danger.TButton')
         self.auto_stop_btn.grid(row=0, column=6)
 
         # Actual clicks under Spins Completed
@@ -1446,6 +1494,14 @@ class SpinHelperApp(tk.Tk):
         wager_frame.pack(fill=tk.X, pady=(8, 0))
         ttk.Label(wager_frame, text="Current Wager:").pack(side=tk.LEFT)
         ttk.Label(wager_frame, textvariable=self.clicker_auto_wager_var, font=('Monaco', 10, 'bold'),
+                 foreground="white").pack(side=tk.LEFT, padx=(6, 0))
+
+        # Current Wager for Counter (manual)
+        self.clicker_manual_wager_var = tk.StringVar(value="£0.00")
+        manual_wager_frame = ttk.Frame(auto_frame)
+        manual_wager_frame.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(manual_wager_frame, text="Current Wager (Manual):").pack(side=tk.LEFT)
+        ttk.Label(manual_wager_frame, textvariable=self.clicker_manual_wager_var, font=('Monaco', 10, 'bold'),
                  foreground="white").pack(side=tk.LEFT, padx=(6, 0))
 
         # User-entered Balance (advisory)
@@ -1522,6 +1578,16 @@ class SpinHelperApp(tk.Tk):
             left, top = int(x - w//2), int(y - h//2)
             
             baseline = ImageGrab.grab(bbox=(left, top, left + w, top + h))
+            # Auxiliary ROI just below the spinner (for games where a sub-button disappears during spin)
+            try:
+                aux_h = max(10, int(h * 0.25))
+                aux_y = top + h + 6
+                aux_left = left + int(w * 0.2)
+                aux_right = left + int(w * 0.8)
+                aux_bbox = (aux_left, aux_y, aux_right, aux_y + aux_h)
+                aux_baseline = ImageGrab.grab(bbox=aux_bbox)
+            except Exception:
+                aux_baseline = None
             
             thumb_img = baseline.copy()
             thumb_img.thumbnail((32, 32))
@@ -1529,6 +1595,9 @@ class SpinHelperApp(tk.Tk):
             
             self.state_slots.spinner.roi = SpinnerROI(left, top, w, h)
             self.state_slots.spinner.baseline_ready = baseline
+            if aux_baseline:
+                self.state_slots.spinner.aux_roi = SpinnerROI(aux_left, aux_y, aux_right - aux_left, aux_h)
+                self.state_slots.spinner.aux_baseline_ready = aux_baseline
             self.state_slots.spinner.ready_color = _avg_rgb(baseline)
             self.state_slots.spinner.ready_brightness = _brightness(baseline)
             self.state_slots.spinner.center_xy = (x, y)
@@ -1998,6 +2067,14 @@ class SpinHelperApp(tk.Tk):
                         self.fs_status_var.set(f"FS ROI set at ({fs['x']},{fs['y']}) {fs['w']}x{fs['h']}")
                 except Exception:
                     pass
+            # Overlay suppression
+            ov = data.get('overlay', {})
+            self.state_slots.suppress_overlay_pause = bool(ov.get('suppress', self.state_slots.suppress_overlay_pause))
+            self.state_slots.suppress_overlay_secs = float(ov.get('secs', self.state_slots.suppress_overlay_secs))
+            if hasattr(self, 'overlay_suppress_var'):
+                self.overlay_suppress_var.set(self.state_slots.suppress_overlay_pause)
+            if hasattr(self, 'overlay_suppress_secs_var'):
+                self.overlay_suppress_secs_var.set(self.state_slots.suppress_overlay_secs)
         except Exception:
             pass
 
@@ -2008,7 +2085,9 @@ class SpinHelperApp(tk.Tk):
             if getattr(self.state_slots, 'fs_roi', None):
                 fs = self.state_slots.fs_roi
                 fs_roi = {"x": fs.x, "y": fs.y, "w": fs.w, "h": fs.h}
-            data = {"geom": self.geometry(), "topmost": bool(self.topmost_var.get()), "fs_roi": fs_roi}
+            data = {"geom": self.geometry(), "topmost": bool(self.topmost_var.get()), "fs_roi": fs_roi,
+                    "overlay": {"suppress": bool(self.overlay_suppress_var.get()) if hasattr(self, 'overlay_suppress_var') else True,
+                                 "secs": float(self.overlay_suppress_secs_var.get()) if hasattr(self, 'overlay_suppress_secs_var') else 11.0}}
             with open(cfg, "w") as f:
                 json.dump(data, f)
         except Exception:
@@ -2018,6 +2097,18 @@ class SpinHelperApp(tk.Tk):
         try:
             self.attributes("-topmost", bool(self.topmost_var.get()))
             self._save_geometry()
+        except Exception:
+            pass
+
+    def _apply_overlay_settings(self):
+        try:
+            self.state_slots.suppress_overlay_pause = bool(self.overlay_suppress_var.get())
+            secs = float(self.overlay_suppress_secs_var.get())
+            secs = max(0.0, min(60.0, secs))
+            self.overlay_suppress_secs_var.set(secs)
+            self.state_slots.suppress_overlay_secs = secs
+            self._save_geometry()
+            self._log(f"Overlay auto-pause suppression: {'ON' if self.state_slots.suppress_overlay_pause else 'OFF'}, {secs:.1f}s")
         except Exception:
             pass
 
@@ -2187,9 +2278,23 @@ class SpinHelperApp(tk.Tk):
             if not path:
                 return
             data = self._collect_session()
+            # Optional friendly session name
+            try:
+                name = simpledialog.askstring("Session Name (optional)", "Enter a friendly session name:", parent=self)
+            except Exception:
+                name = None
+            if name:
+                try:
+                    data["name"] = name.strip()
+                except Exception:
+                    pass
             with open(path, 'w') as f:
                 json.dump(data, f, indent=2)
             self._log(f"Session saved to {path}", bright_blue=True)
+            try:
+                self.session_name_var.set((name.strip() if name else None) or os.path.basename(path))
+            except Exception:
+                pass
         except Exception as e:
             self._log(f"Session save error: {e}", red=True)
 
@@ -2203,6 +2308,11 @@ class SpinHelperApp(tk.Tk):
                 data = json.load(f)
             self._apply_session(data)
             self._log(f"Loaded session from {path}", bright_blue=True)
+            try:
+                name = data.get('name') if isinstance(data, dict) else None
+                self.session_name_var.set(name or os.path.basename(path))
+            except Exception:
+                pass
         except Exception as e:
             self._log(f"Session load error: {e}", red=True)
 
@@ -2309,10 +2419,15 @@ class SpinHelperApp(tk.Tk):
             bet = 0.0
             if hasattr(self, 'clicker_calculator'):
                 bet = float(self.clicker_calculator.bet_var.get() or "0")
-            done = int(self.clicker_auto_done.get() if hasattr(self, 'clicker_auto_done') else 0)
-            current = done * bet
+            auto_done = int(self.clicker_auto_done.get() if hasattr(self, 'clicker_auto_done') else 0)
+            current = auto_done * bet
             if hasattr(self, 'clicker_auto_wager_var'):
                 self.clicker_auto_wager_var.set(f"£{current:.2f}")
+            # Also update Counter (manual) current wager
+            manual_done = int(self.clicker_manual_done.get() if hasattr(self, 'clicker_manual_done') else 0)
+            manual_current = manual_done * bet
+            if hasattr(self, 'clicker_manual_wager_var'):
+                self.clicker_manual_wager_var.set(f"£{manual_current:.2f}")
         except Exception:
             pass
         finally:

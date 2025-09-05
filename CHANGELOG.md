@@ -350,19 +350,39 @@ Guardrails for wager target and balance inputs; minor UI tweaks.
 - Calculator: renamed "Amount (£)" to "Bonus (£)" and added a user-entered "Balance (£)" field plus a "Bonus used before cash" toggle (advisory).
 - Clicker Automatic: Balance input under "Current Wager" for quick reference.
 - Apply Target now also applies the Balance value from the calculator to the current feature (e.g., Clicker → Automatic Balance box).
- - Session save/load: Manual Save/Load buttons store current counters, calculator values, FS detection state, spinner geometry (for reference), and last log lines. Saves to `~/spin_helper_sessions/`. Loads remind to re-capture the spinner baseline and re-select browser.
- - Auto-saves: When Slots/Automatic targets/wager goals are reached, the app writes a timestamped autosave in the sessions folder.
+- Session save/load: Manual Save/Load buttons store current counters, calculator values, FS detection state, spinner geometry (for reference), and last log lines. Saves to `~/spin_helper_sessions/`. Loads remind to re-capture the spinner baseline and re-select browser.
+- Auto-saves: When Slots/Automatic targets/wager goals are reached, the app writes a timestamped autosave in the sessions folder.
+ - Session name indicator: Shows current session name (or “No session loaded”) beside Load Session. Defaults to filename when loading.
 
 ### Changed
 - Automatic: stops when wager target is reached (based on Clicker calculator Total Wager and Bet/spin), in addition to click target.
 - Log colors: pre-click phases now orange; pause/stop/reset messages use bright blue for clarity.
 - Actual Clicks (Automatic): counts only the primary spin clicks when the button is READY; does not include rescue or away-from-spin overlay clicks.
 - Pause behavior: pre-click overlay attempts abort immediately when paused (mouse away or manual pause) to avoid pointer movement until resume.
+ - Stop/Reset buttons use a red-with-white-text style for visibility.
+ - Target Calculator frames use a blue background (#4a86e8) consistently.
+ - Suppress auto-pause during intentional overlay clicks away from spinner to avoid false “Auto-paused” events.
+ - Spin readiness: added auxiliary ROI (below spinner) check to better detect “spin in progress” on games with static spin buttons.
 
 ### Fixed
 - Session save/load: define `SESSIONS_DIR` early and create directory on demand to prevent "name 'SESSIONS_DIR' is not defined" and missing-directory errors during Save/Load.
 
 ### Notes
 - Balance is user-entered; the app does not read game balances. If you see the in-game cash balance drop to your configured amount, stop playing and withdraw.
+
+---
+## [1.17.9] — 2025-09-05
+Quality-of-life controls and static-button detection improvements.
+
+### Added
+- Overlay handling control: toggle to "Suppress auto-pause during overlay handling" with configurable suppression duration.
+- Session name indicator in toolbar.
+
+### Changed
+- Auxiliary ROI captured beneath spinner and used in readiness checks to better detect "spin in progress" on static spin buttons.
+- Stop/Reset buttons styled red/white for clarity; calculators use blue background.
+
+### Fixed
+- Reduced false auto-pauses during intentional overlay clicks by suppressing mouse-based pause for the configured duration.
 
 ---
