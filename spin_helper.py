@@ -1,4 +1,4 @@
-# spin_helper.py — v1.17.9
+# spin_helper.py — v1.18.0
 from __future__ import annotations
 # FIXED: Counter mode click detection, cross-contamination, consistent button behavior
 # FIXED: Slots mouse positioning, proper state isolation between modes
@@ -45,7 +45,7 @@ except ImportError:
 
 # --------------- Constants ---------------
 
-APP_VERSION = "1.17.9"
+APP_VERSION = "1.18.2"
 UI_FLUSH_MS = 60
 SESSIONS_DIR = os.path.join(os.path.expanduser("~"), "spin_helper_sessions")
 
@@ -54,7 +54,9 @@ PIX_DIFF_READY = 4.0
 PIX_DIFF_CHANGED = 10.0
 SPIN_CHANGE_TIMEOUT = 25.0
 CHANGE_STICK_MS = 180
-MIN_VALID_SPIN_MS = 2000
+# Minimum spin duration heuristic (for logging only). Spins shorter than this
+# will be flagged as "short" but still counted to avoid false negatives.
+MIN_VALID_SPIN_MS = 2500
 MAX_CONSECUTIVE_BLIPS = 3
 
 # Long-spin handling (avoid premature rescues on long wins/anticipation)
@@ -745,6 +747,16 @@ class EmbeddedCalculator:
             if hasattr(self.app, 'state_slots'):
                 self.app.state_slots.automation.target_count = target
 
+            # For Slots: update the applied display values under Automation Controls
+            if getattr(self, 'feature_name', '') == 'Slots':
+                try:
+                    if hasattr(self.app, 'slots_meta_target_var'):
+                        self.app.slots_meta_target_var.set(str(target))
+                    if hasattr(self.app, 'slots_meta_total_var'):
+                        self.app.slots_meta_total_var.set(self.total_var.get())
+                except Exception:
+                    pass
+            
             # Propagate Balance to current feature's balance field if present
             bal = getattr(self, 'balance_var', None)
             if bal is not None:
@@ -1094,6 +1106,16 @@ class SpinDetector:
                     phase = PreClickPhase.READY
                     self.log(f"Pre-click phase: {phase.value}", orange=True)
                     return True
+            else:
+                # Relaxed READY check: allow small tolerance to break out and click
+                try:
+                    roi = self.state.spinner.roi
+                    cur = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
+                    if _rms(cur, baseline) <= (PIX_DIFF_READY + 3.0):
+                        self.log("Pre-click: relaxed READY satisfied — proceeding", orange=True)
+                        return True
+                except Exception:
+                    pass
 
             # Perform an away-from-spin click to advance overlays/requests for input
             phase = PreClickPhase.OVERLAY_PROGRESS
@@ -1344,14 +1366,7 @@ class SpinHelperApp(tk.Tk):
         self.spinner_thumb_label = ttk.Label(spinner_controls)
         self.spinner_thumb_label.pack(side=tk.LEFT, padx=(10, 0))
         
-        # System info
-        sys_frame = ttk.LabelFrame(tab_env, text="System Information", padding=10)
-        sys_frame.pack(fill=tk.X, padx=8, pady=8)
-        
-        info_text = f"Python: {sys.version.split()[0]} | Platform: {sys.platform}\n"
-        info_text += f"PIL: {PIL_AVAILABLE} | PyAutoGUI: {PYAUTOGUI_AVAILABLE} | Pynput: {PYNPUT_AVAILABLE}\n"
-        info_text += "Consistent Ready/Pause/Stop behavior across all features"
-        ttk.Label(sys_frame, text=info_text, justify=tk.LEFT).pack(anchor='w')
+        # (System Information panel hidden for now; keep terminal logs via check_dependencies)
 
         # Overlay handling controls
         overlay_frame = ttk.LabelFrame(tab_env, text="Overlay Handling", padding=10)
@@ -1364,7 +1379,7 @@ class SpinHelperApp(tk.Tk):
         # Waiting/Session controls
         wait_frame = ttk.LabelFrame(tab_env, text="Waiting & Sessions", padding=10)
         wait_frame.pack(fill=tk.X, padx=8, pady=8)
-        ttk.Checkbutton(wait_frame, text="Infinite wait after click (READY→∞)",
+        ttk.Checkbutton(wait_frame, text="Infinite Wait (Manual Mode)",
                         variable=self.infinite_wait_var).pack(side=tk.LEFT)
         ttk.Checkbutton(wait_frame, text="Auto-save session when target reached",
                         variable=self.auto_save_on_target_var).pack(side=tk.LEFT, padx=(12, 0))
@@ -1440,14 +1455,16 @@ class SpinHelperApp(tk.Tk):
         self.slots_calculator = EmbeddedCalculator(tab_slots, self, "Slots")
         self.slots_calculator.pack(fill=tk.X, padx=8, pady=8)
 
-        # Display calculator targets for visibility (under Automation Controls)
+        # Display calculator targets for visibility (under Automation Controls) — bound to applied values only
         slots_meta_frame = ttk.Frame(auto_frame)
         slots_meta_frame.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(slots_meta_frame, text="Target Spins:").pack(side=tk.LEFT)
-        ttk.Label(slots_meta_frame, textvariable=self.slots_calculator.target_var, font=('Monaco', 10, 'bold'),
+        self.slots_meta_target_var = tk.StringVar(value="—")
+        ttk.Label(slots_meta_frame, textvariable=self.slots_meta_target_var, font=('Monaco', 10, 'bold'),
                   foreground="white").pack(side=tk.LEFT, padx=(6, 15))
         ttk.Label(slots_meta_frame, text="Total Wagering:").pack(side=tk.LEFT)
-        ttk.Label(slots_meta_frame, textvariable=self.slots_calculator.total_var, font=('Monaco', 10, 'bold'),
+        self.slots_meta_total_var = tk.StringVar(value="—")
+        ttk.Label(slots_meta_frame, textvariable=self.slots_meta_total_var, font=('Monaco', 10, 'bold'),
                   foreground="white").pack(side=tk.LEFT, padx=(6, 0))
 
     def _build_roulette_tab(self):
@@ -1872,11 +1889,14 @@ class SpinHelperApp(tk.Tk):
                     self._log(f"Slots: Spin #{spin_num} - completion timeout")
                     continue
                 
-                # Count successful spin
+                # Count successful spin and log if short
+                elapsed_ms = (time.time() - t_start) * 1000.0
                 self.state_slots.automation.total_done += 1
                 self.slots_counter_var.set(str(self.state_slots.automation.total_done))
-                elapsed_ms = (time.time() - t_start) * 1000.0
-                self._log(f"Slots: Spin #{spin_num} completed successfully in {elapsed_ms:.0f} ms", green=True)
+                if elapsed_ms < MIN_VALID_SPIN_MS:
+                    self._log(f"Slots: Spin #{spin_num} completed (short: {elapsed_ms:.0f} ms)", orange=True)
+                else:
+                    self._log(f"Slots: Spin #{spin_num} completed successfully in {elapsed_ms:.0f} ms", green=True)
 
                 # Anti-idle waggle for Slots
                 if (self.waggle_on_var.get() and 
@@ -1965,9 +1985,15 @@ class SpinHelperApp(tk.Tk):
         # Reset pause flags to ensure clean start
         self.state_slots.automation.paused_by_mouse = False
         self.state_slots.automation.paused_manually = False
-        # Reset Actual Clicks counter for Automatic mode
-        self.state_slots.automation.actual_clicks = 0
-        self.clicker_auto_actual_clicks.set(0)
+        # Preserve Actual Clicks across resumes; reset only if starting fresh
+        try:
+            starting_fresh = int(self.clicker_auto_done.get()) == 0 if hasattr(self, 'clicker_auto_done') else True
+        except Exception:
+            starting_fresh = True
+        if starting_fresh:
+            self.state_slots.automation.actual_clicks = 0
+            if hasattr(self, 'clicker_auto_actual_clicks'):
+                self.clicker_auto_actual_clicks.set(0)
         
         # Update UI
         self.auto_ready_btn.config(state=tk.DISABLED, text="Running...")
@@ -2021,8 +2047,8 @@ class SpinHelperApp(tk.Tk):
                     time.sleep(0.5)
                     continue
                 
-                done += 1
-                self._log(f"Automatic: Executing click #{done}/{target}")
+                next_idx = done + 1
+                self._log(f"Automatic: Executing click #{next_idx}/{target}")
                 
                 if not self.spin_detector.ensure_ready_multigrace(baseline):
                     if (self.state_slots.automation.paused_by_mouse or 
@@ -2035,12 +2061,12 @@ class SpinHelperApp(tk.Tk):
                 t_start = time.time()
                 self._log("Automatic: Spin button looks READY — clicking", orange=True)
                 if not self.spin_detector.do_click():
-                    self._log(f"Automatic: Click #{done} - click failed")
+                    self._log(f"Automatic: Click #{next_idx} - click failed")
                     break
                 
                 # REQUIRE: see NOT_READY after click, else consider it a no-op
                 if not self.spin_detector._wait_for_change(baseline, become_changed=True, timeout=1.8):
-                    self._log(f"Automatic: Click #{done} - no visual change")
+                    self._log(f"Automatic: Click #{next_idx} - no visual change")
                     continue
                 # Count the actual click only when NOT_READY follows (real spin start)
                 try:
@@ -2053,8 +2079,12 @@ class SpinHelperApp(tk.Tk):
                         grace_sec=LONG_SPIN_GRACE_SEC,
                         max_timeout=(999999 if self.infinite_wait_var.get() else SPIN_CHANGE_TIMEOUT),
                         allow_grace_click=True):
-                    self.clicker_auto_done.set(done)
                     elapsed_ms = (time.time() - t_start) * 1000.0
+                    if elapsed_ms < MIN_VALID_SPIN_MS:
+                        self._log(f"Automatic: Spin #{next_idx} too short ({elapsed_ms:.0f} ms < {MIN_VALID_SPIN_MS} ms) — retrying", orange=True)
+                        continue
+                    done = next_idx
+                    self.clicker_auto_done.set(done)
                     self._log(f"Automatic: Click #{done}/{target} completed in {elapsed_ms:.0f} ms", green=True)
                     # Guardrail: stop at wager target if reached (from Clicker calculator)
                     try:

@@ -398,3 +398,47 @@ Quality-of-life controls and static-button detection improvements.
 - Consistent Current Wager layout and naming across Slots, Counter, and Automatic.
 
 ---
+## [1.18.0] — 2025-09-06
+Stability hotfix and UI consistency from v1.17.9 HOTFIX testing.
+
+### Added
+- Status banner heuristic: bottom-center banner ROI considered alongside FS and slots ROIs to bias waits during animations/wins.
+
+### Changed
+- Automatic/Slots: Actual Clicks increment only when a NOT_READY state immediately follows the primary click (real spin start).
+- Overlay/rescue clicks: localized near spinner; app temporarily drops topmost during the click so the game receives it.
+- Environment: "Infinite wait after click" renamed to "Infinite Wait (Manual Mode)".
+- Environment: System Information panel hidden (terminal logs remain via dependency checks).
+- Slots UI: Target Spins and Total Wagering shown under Automation Controls only reflect applied targets (Calculate no longer updates these until Apply Target is used).
+- Current Wager layout/naming consistent across Slots, Counter, and Automatic.
+- Actual Clicks semantics: increments only once a real spin begins (NOT_READY observed), so Actual Clicks generally leads Spins Completed by at most one and never lags due to resume.
+
+### Fixed
+- Automatic: preserved progress (Done) across Ready after pauses; removed reset scenarios.
+- Automatic/Slots: prevented overlay clicks from jumping to other monitors; reduced false completes and miscounts.
+- Automatic: preserve Actual Clicks and Done across Ready after pause (no resets unless Stop/Reset is used).
+
+---
+## [1.18.1] — 2025-09-07
+Hotfix: restore robust counting while flagging short spins
+
+### Changed
+- Reverted strict spin-duration gating. Spins are counted once NOT_READY→READY is observed; durations under a heuristic threshold (default 3000 ms) are logged as “short” but not discarded.
+- Relaxed READY check in pre-click path: if animations are not active and spinner ROI closely matches baseline (small tolerance), proceed to click.
+
+### Rationale
+- Some games legitimately complete spins a bit faster than 3.5s; skipping them caused missed wagering. This hotfix restores dependable counting while retaining visibility on suspiciously fast cycles.
+
+---
+## [1.18.2] — 2025-09-07
+Stability: click→spin bookkeeping and short-spin retry
+
+### Changed
+- Automatic: increments Spins Completed only after a confirmed spin (NOT_READY→READY) and moves the Done increment to post‑confirmation. “No visual change” no longer advances the sequence number.
+- Actual Clicks semantics preserved: increments only when NOT_READY follows the primary click.
+- Short spins: if a confirmed spin completes in < 2500 ms, it is treated as suspect and retried (not counted). Threshold is `MIN_VALID_SPIN_MS`.
+
+### Notes
+- Pre‑click remains the primary gate. Overlay/rescue clicks stay near the spinner and never count towards Actual Clicks.
+
+---
