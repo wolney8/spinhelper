@@ -45,7 +45,7 @@ except ImportError:
 
 # --------------- Constants ---------------
 
-APP_VERSION = "1.18.2"
+APP_VERSION = "1.18.7"
 UI_FLUSH_MS = 60
 SESSIONS_DIR = os.path.join(os.path.expanduser("~"), "spin_helper_sessions")
 
@@ -862,7 +862,7 @@ class SpinDetector:
     def wait_ready_with_grace(self, baseline: Image.Image,
                                grace_sec: float = LONG_SPIN_GRACE_SEC,
                                max_timeout: float = SPIN_CHANGE_TIMEOUT,
-                               allow_grace_click: bool = True) -> bool:
+                               allow_grace_click: bool = False) -> bool:
         """Wait for READY state with a grace window before any rescue.
 
         After grace_sec elapses, optionally perform a single gentle click to
@@ -889,18 +889,7 @@ class SpinDetector:
                 time.sleep(0.05)
                 continue
 
-            if (allow_grace_click and not grace_clicked and self.state.spinner.center_xy and PYAUTOGUI_AVAILABLE
-                and not self.state.automation.paused_by_mouse and not self.state.automation.paused_manually):
-                try:
-                    x, y = self.state.spinner.center_xy
-                    jx = x + random.randint(-JITTER_PX, JITTER_PX)
-                    jy = y + random.randint(-JITTER_PX, JITTER_PX)
-                    pg.moveTo(jx, jy, duration=0.06)
-                    pg.click()
-                    self.log("Grace click after long wait (overlay suspected)")
-                except Exception:
-                    pass
-                grace_clicked = True
+            # No grace clicks here — only passive waiting to avoid accidental spins
 
             time.sleep(0.06)
         return False
@@ -1057,6 +1046,59 @@ class SpinDetector:
             except Exception:
                 pass
 
+    def _click_bottom_center(self) -> None:
+        """Perform a gentle click near the bottom‑center banner area to advance overlays.
+
+        This intentionally avoids the spin button. It prefers the derived
+        status banner ROI; if unavailable, it falls back to screen bottom‑center.
+        Temporarily drops app topmost via callbacks so the browser receives the click.
+        """
+        try:
+            if not PYAUTOGUI_AVAILABLE:
+                return
+            # Prefer derived status banner ROI
+            roi = None
+            try:
+                roi = self._derive_status_banner_roi()
+            except Exception:
+                roi = None
+            if roi:
+                tx = roi.x + roi.w // 2 + random.randint(-20, 20)
+                ty = roi.y + roi.h // 2 + random.randint(-12, 12)
+            else:
+                try:
+                    sw, sh = pg.size()
+                except Exception:
+                    sw, sh = 1920, 1080
+                tx = sw // 2 + random.randint(-30, 30)
+                ty = int(sh * 0.85) + random.randint(-15, 15)
+
+            # Suppress auto‑pause if enabled
+            try:
+                if getattr(self.state, 'suppress_overlay_pause', True):
+                    secs = float(getattr(self.state, 'suppress_overlay_secs', PRE_READY_WAIT_AFTER_CLICK))
+                    self.state.automation.suppress_mouse_pause_until = time.time() + secs
+            except Exception:
+                pass
+
+            # Temporarily drop topmost via callbacks
+            try:
+                if self.on_overlay_click_start:
+                    self.on_overlay_click_start()
+            except Exception:
+                pass
+
+            pg.moveTo(tx, ty, duration=0.08)
+            pg.click()
+        except Exception:
+            pass
+        finally:
+            try:
+                if self.on_overlay_click_end:
+                    self.on_overlay_click_end()
+            except Exception:
+                pass
+
     def wait_while_fs_active(self, max_seconds: float = 180.0, check_interval: float = 0.5) -> float:
         """Block while FS/animation area is active; returns seconds waited."""
         t0 = time.time()
@@ -1117,7 +1159,8 @@ class SpinDetector:
                 except Exception:
                     pass
 
-            # Perform an away-from-spin click to advance overlays/requests for input
+            # Gentle overlay progression: a small click near the spinner (same monitor),
+            # never on the spin button. Helps clear "press anywhere" overlays.
             phase = PreClickPhase.OVERLAY_PROGRESS
             self.log(f"Pre-click: spin NOT READY; overlay suspected — {phase.value} (attempt {clicks + 1})", orange=True)
             self._click_anywhere_to_continue()
@@ -1874,11 +1917,6 @@ class SpinHelperApp(tk.Tk):
                 if not self.spin_detector._wait_for_change(baseline, become_changed=True, timeout=1.8):
                     self._log(f"Slots: Spin #{spin_num} - no visual change")
                     continue
-                # Count the actual click only when NOT_READY follows
-                try:
-                    self._inc_actual_clicks()
-                except Exception:
-                    pass
                 
                 # Then wait until READY (with grace)
                 if not self.spin_detector.wait_ready_with_grace(
@@ -1889,8 +1927,12 @@ class SpinHelperApp(tk.Tk):
                     self._log(f"Slots: Spin #{spin_num} - completion timeout")
                     continue
                 
-                # Count successful spin and log if short
+                # Count successful spin and log if short — keep Actual Clicks aligned
                 elapsed_ms = (time.time() - t_start) * 1000.0
+                try:
+                    self._inc_actual_clicks()
+                except Exception:
+                    pass
                 self.state_slots.automation.total_done += 1
                 self.slots_counter_var.set(str(self.state_slots.automation.total_done))
                 if elapsed_ms < MIN_VALID_SPIN_MS:
@@ -2068,11 +2110,6 @@ class SpinHelperApp(tk.Tk):
                 if not self.spin_detector._wait_for_change(baseline, become_changed=True, timeout=1.8):
                     self._log(f"Automatic: Click #{next_idx} - no visual change")
                     continue
-                # Count the actual click only when NOT_READY follows (real spin start)
-                try:
-                    self._inc_actual_clicks()
-                except Exception:
-                    pass
                 
                 if self.spin_detector.wait_ready_with_grace(
                         baseline,
@@ -2083,6 +2120,11 @@ class SpinHelperApp(tk.Tk):
                     if elapsed_ms < MIN_VALID_SPIN_MS:
                         self._log(f"Automatic: Spin #{next_idx} too short ({elapsed_ms:.0f} ms < {MIN_VALID_SPIN_MS} ms) — retrying", orange=True)
                         continue
+                    # Count the actual click and the completed spin together to avoid mismatch
+                    try:
+                        self._inc_actual_clicks()
+                    except Exception:
+                        pass
                     done = next_idx
                     self.clicker_auto_done.set(done)
                     self._log(f"Automatic: Click #{done}/{target} completed in {elapsed_ms:.0f} ms", green=True)

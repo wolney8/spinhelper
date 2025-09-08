@@ -442,3 +442,68 @@ Stability: click→spin bookkeeping and short-spin retry
 - Pre‑click remains the primary gate. Overlay/rescue clicks stay near the spinner and never count towards Actual Clicks.
 
 ---
+## [1.18.3] — 2025-09-08
+Precision: overlay clicks and readiness wait
+
+### Changed
+- Grace click target changed to bottom‑center banner area (never on the spin button) to avoid unintended spins during waits.
+- Added bottom‑center click helper and used it in the post‑click READY wait path.
+- Kept pre‑click gating primary; readiness includes relaxed tolerance when animations inactive to prevent stalls.
+
+### Notes
+- Actual Clicks increments only when a real spin begins (NOT_READY observed). Spins Completed increments only after NOT_READY→READY. Short spins < 2500 ms are retried.
+
+---
+
+## [1.18.4] — 2025-09-08
+Hotfix: keep grace clicks on the same screen and off the spin button
+
+### Changed
+- Replaced post‑click grace action to use a local, near‑spinner offset again (same monitor), never the spin button, to avoid unintended spins and focus changes.
+
+### Notes
+- Pre‑click gating and NOT_READY→READY counting logic unchanged; short‑spin retry (< 2500 ms) remains active.
+
+---
+
+## [1.18.5] — 2025-09-08
+Hotfix: remove grace clicks to prevent focus loss and unintended spins
+
+### Changed
+- Disabled all grace/overlay clicks during pre‑click readiness and post‑click WAIT. The detector now passively waits for READY based solely on visual state (and animation heuristics), preventing any cursor movement that might trigger spins or jump to another monitor.
+
+### Notes
+- Primary gate and counting unaffected: Actual Clicks increments on immediate NOT_READY after click; Spins Completed increments on NOT_READY→READY; short spins < 2500 ms retried.
+
+---
+## [1.18.6] — 2025-09-08
+Hotfix: restore gentle pre‑click overlay progression (same monitor)
+
+### Changed
+- Re‑enabled a safe, near‑spinner overlay progression click in the pre‑click path to clear “press anywhere” overlays without touching the spin button. This mirrors the stable 1.18.2 behavior and prevents stalling during pre‑click readiness.
+
+### Notes
+- Post‑click waiting remains passive (no grace clicks). Counting continues to require NOT_READY immediately after the primary click, and NOT_READY→READY to increment Spins Completed. Short spins < 2500 ms are retried.
+
+---
+
+## [1.18.7] — 2025-09-08
+Hotfix: eliminate click/spin mismatches and restore progress
+
+### Changed
+- Automatic/Slots: Actual Clicks now increments together with a confirmed spin (after NOT_READY→READY) to avoid mismatches when completions time out. Primary gate and short‑spin retry remain unchanged.
+- Pre‑click: retains safe near‑spinner overlay progression to prevent stalls (same monitor, never spin button).
+
+### Notes
+- Counting remains strict: click logs appear, but numbers advance only once a real spin cycle is confirmed. Short spins (< 2500 ms) are retried.
+
+---
+
+### Milestone (v1.18.7)
+- Working baseline: Clicker → Automatic ran 75 consecutive clicks without issue (no focus loss), confirming core spin detection flow is stable again.
+- Scope: Only working feature validated is Clicker → Automatic; other modes not part of this milestone.
+- No click/spin mismatches: Clicks and Spins advance together only after NOT_READY→READY; “no visual change” does not advance.
+- Short‑spin policy: spins < 2500 ms are treated as suspect and retried (not counted).
+- Overlays: Not fully re‑tested in this milestone; pre‑click overlay progression matches v1.18.2 approach (small, near‑spinner poke on same monitor, never the spin button). Post‑click remains passive.
+- Focus: Spinner detection and clicking do not steal focus; no cross‑monitor jumps observed.
+- Reference code used to restore behavior: reviewed and ported patterns from `_backup/spin_helper (d9cba47).py` (v1.17.9 baseline) and the previously stable v1.18.2 pre‑click overlay progression.
