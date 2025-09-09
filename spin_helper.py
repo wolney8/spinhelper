@@ -45,13 +45,14 @@ except ImportError:
 
 # --------------- Constants ---------------
 
-APP_VERSION = "1.18.7"
+APP_VERSION = "1.18.10"
 UI_FLUSH_MS = 60
 SESSIONS_DIR = os.path.join(os.path.expanduser("~"), "spin_helper_sessions")
 
 # Spin detection thresholds
 PIX_DIFF_READY = 4.0
 PIX_DIFF_CHANGED = 10.0
+READY_SLACK = 4.5  # tolerance to treat near-baseline as READY
 SPIN_CHANGE_TIMEOUT = 25.0
 CHANGE_STICK_MS = 180
 # Minimum spin duration heuristic (for logging only). Spins shorter than this
@@ -63,10 +64,10 @@ MAX_CONSECUTIVE_BLIPS = 3
 LONG_SPIN_GRACE_SEC = 4.0
 
 # Pre-click readiness handling (Automatic/Slots): allow multiple grace clicks
-PRE_READY_INITIAL_WAIT = 4.0
-PRE_READY_GRACE_CLICKS = 3
-PRE_READY_WAIT_AFTER_CLICK = 10.0
-PRE_READY_MAX_TIMEOUT = 45.0
+PRE_READY_INITIAL_WAIT = 0.6
+PRE_READY_GRACE_CLICKS = 0
+PRE_READY_WAIT_AFTER_CLICK = 3.0
+PRE_READY_MAX_TIMEOUT = 18.0
 
 # Free-Spins animation heuristics (optional; only if FS ROI is set)
 FS_ANIM_RMS_ACTIVE = 5.0  # average RMS threshold to consider area "active"
@@ -225,9 +226,15 @@ class ClickDetector:
             # Check if click is near spinner location and Counter mode is active
             if hasattr(self.app, 'counter_mode_active') and self.app.counter_mode_active:
                 if self.app.state_slots.spinner.center_xy:
-                    sx, sy = self.app.state_slots.spinner.center_xy
-                    distance = math.sqrt((x - sx)**2 + (y - sy)**2)
-                    if distance <= 50:  # Click within 50px of spinner
+                    roi = self.app.state_slots.spinner.roi
+                    inside = False
+                    if roi:
+                        inside = (roi.x <= x <= roi.x + roi.w and roi.y <= y <= roi.y + roi.h)
+                    else:
+                        sx, sy = self.app.state_slots.spinner.center_xy
+                        distance = math.sqrt((x - sx)**2 + (y - sy)**2)
+                        inside = distance <= 50
+                    if inside:
                         # Log interval between clicks as an approximation of spin duration
                         now_t = time.time()
                         if self.last_click_ts is not None:
@@ -804,19 +811,25 @@ class SpinDetector:
         try:
             current = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
             rms = _rms(current, spinner.baseline_ready)
-            # Auxiliary check: if aux ROI captured, treat large change as NOT_READY
+            # Compute auxiliary activity if available
+            aux_diff = None
             if spinner.aux_roi and spinner.aux_baseline_ready is not None:
-                aux = ImageGrab.grab(bbox=(spinner.aux_roi.x, spinner.aux_roi.y, spinner.aux_roi.x + spinner.aux_roi.w, spinner.aux_roi.y + spinner.aux_roi.h))
+                aux = ImageGrab.grab(bbox=(spinner.aux_roi.x, spinner.aux_roi.y,
+                                           spinner.aux_roi.x + spinner.aux_roi.w,
+                                           spinner.aux_roi.y + spinner.aux_roi.h))
                 aux_diff = _rms(aux, spinner.aux_baseline_ready)
-                if aux_diff >= PIX_DIFF_CHANGED:
-                    return SpinState.NOT_READY
-            
-            if rms <= PIX_DIFF_READY:
+
+            # Relaxed READY check — tolerate small wiggle around baseline
+            if rms <= (PIX_DIFF_READY + READY_SLACK):
                 return SpinState.READY
-            elif rms >= PIX_DIFF_CHANGED:
+
+            # If auxiliary region shows strong activity and main is not near ready, treat as NOT_READY
+            if aux_diff is not None and aux_diff >= PIX_DIFF_CHANGED and rms > (PIX_DIFF_READY + READY_SLACK):
                 return SpinState.NOT_READY
-            else:
-                return SpinState.UNKNOWN
+
+            if rms >= PIX_DIFF_CHANGED:
+                return SpinState.NOT_READY
+            return SpinState.UNKNOWN
             
         except Exception:
             return SpinState.UNKNOWN
@@ -891,7 +904,7 @@ class SpinDetector:
 
             # No grace clicks here — only passive waiting to avoid accidental spins
 
-            time.sleep(0.06)
+            time.sleep(0.03)
         return False
 
     def _rescue_once_then_wait_ready(self, baseline: Image.Image, wait_after_click: float = SPIN_CHANGE_TIMEOUT) -> bool:
@@ -1123,7 +1136,7 @@ class SpinDetector:
         t0 = time.time()
 
         phase = PreClickPhase.INITIAL_WAIT
-        self.log(f"Pre-click phase: {phase.value}", orange=True)
+        self.log(f"Pre-click phase: {phase.value}", yellow=True)
         # Initial wait
         if self._wait_for_change(baseline, become_changed=False, timeout=PRE_READY_INITIAL_WAIT):
             phase = PreClickPhase.READY
@@ -1146,7 +1159,7 @@ class SpinDetector:
                 # quick re-check for ready without clicking
                 if self._wait_for_change(baseline, become_changed=False, timeout=0.5):
                     phase = PreClickPhase.READY
-                    self.log(f"Pre-click phase: {phase.value}", orange=True)
+                    self.log(f"Pre-click phase: {phase.value}", yellow=True)
                     return True
             else:
                 # Relaxed READY check: allow small tolerance to break out and click
@@ -1154,7 +1167,7 @@ class SpinDetector:
                     roi = self.state.spinner.roi
                     cur = ImageGrab.grab(bbox=(roi.x, roi.y, roi.x + roi.w, roi.y + roi.h))
                     if _rms(cur, baseline) <= (PIX_DIFF_READY + 3.0):
-                        self.log("Pre-click: relaxed READY satisfied — proceeding", orange=True)
+                        self.log("Pre-click: relaxed READY satisfied — proceeding", yellow=True)
                         return True
                 except Exception:
                     pass
@@ -1163,15 +1176,22 @@ class SpinDetector:
             # never on the spin button. Helps clear "press anywhere" overlays.
             phase = PreClickPhase.OVERLAY_PROGRESS
             self.log(f"Pre-click: spin NOT READY; overlay suspected — {phase.value} (attempt {clicks + 1})", orange=True)
+            # If spinner appears READY here, assume last spin complete
+            st_now = self.get_current_state()
+            if st_now == SpinState.READY:
+                self.log("Pre-click: spinner READY — assuming previous spin complete", yellow=True)
+                return True
+            # Otherwise perform a safe near‑spinner click on same screen
             self._click_anywhere_to_continue()
 
             # If paused mid-phase, wait READY and abort
             if self.state.automation.paused_by_mouse or self.state.automation.paused_manually:
                 self._wait_for_change(baseline, become_changed=False, timeout=SPIN_CHANGE_TIMEOUT*2)
                 return False
-            # Wait and check READY after the grace click
-            if self._wait_for_change(baseline, become_changed=False, timeout=PRE_READY_WAIT_AFTER_CLICK):
-                return True
+        # Wait and check READY after the progression action
+        if self._wait_for_change(baseline, become_changed=False, timeout=PRE_READY_WAIT_AFTER_CLICK):
+            self.log("Pre-click: READY", yellow=True)
+            return True
 
             # If FS area becomes active, wait until it calms down (free spins, big win, etc.)
             if self._fs_area_active():
@@ -1182,7 +1202,7 @@ class SpinDetector:
                 # After waiting, re-check READY quickly
                 if self._wait_for_change(baseline, become_changed=False, timeout=2.0):
                     phase = PreClickPhase.READY
-                    self.log(f"Pre-click phase: {phase.value}", orange=True)
+                    self.log(f"Pre-click phase: {phase.value}", yellow=True)
                     return True
 
             clicks += 1
@@ -1317,10 +1337,10 @@ class SpinHelperApp(tk.Tk):
         self.sections = ttk.Notebook(left_inner)
         self.sections.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        # Build tabs
+        # Build tabs (temporarily disable Slots and Roulette to focus on Clicker)
         self._build_env_tab()
-        self._build_slots_tab()
-        self._build_roulette_tab()
+        # self._build_slots_tab()  # disabled for current focus
+        # self._build_roulette_tab()  # disabled for current focus
         self._build_clicker_tab()
 
         # Right log panel
@@ -1350,11 +1370,15 @@ class SpinHelperApp(tk.Tk):
         self.tag_bright_blue = "bright_blue"
         self.tag_orange = "orange"
         self.tag_red = "red"
+        self.tag_yellow = "yellow"
+        self.tag_amber = "amber"
         self.log.tag_configure(self.tag_green, foreground="#00a000")
         self.log.tag_configure(self.tag_blue, foreground="#0066cc")
         self.log.tag_configure(self.tag_bright_blue, foreground="#00aaff")
         self.log.tag_configure(self.tag_orange, foreground="#ff8c00")
         self.log.tag_configure(self.tag_red, foreground="#cc0000")
+        self.log.tag_configure(self.tag_yellow, foreground="#ffd11a")
+        self.log.tag_configure(self.tag_amber, foreground="#ff8c00")
 
         # Mouse wheel support
         self.left_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
@@ -1548,8 +1572,11 @@ class SpinHelperApp(tk.Tk):
             "'Pause' stops detection. 'Stop/Reset' clears counters."
         )).pack(anchor='w', pady=(0, 8))
         
-        self.clicker_manual_target = tk.IntVar(value=0)
-        self.clicker_manual_done = tk.IntVar(value=0)
+        # Shared progress across Counter and Automatic
+        self.clicker_shared_target = tk.IntVar(value=0)
+        self.clicker_shared_done = tk.IntVar(value=0)
+        self.clicker_manual_target = self.clicker_shared_target
+        self.clicker_manual_done = self.clicker_shared_done
         
         counter_controls = ttk.Frame(counter_frame)
         counter_controls.pack(fill=tk.X)
@@ -1594,8 +1621,8 @@ class SpinHelperApp(tk.Tk):
         auto_frame = ttk.LabelFrame(auto_tab, text="Automatic Click Controls", padding=8)
         auto_frame.pack(fill=tk.X, padx=8, pady=8)
         
-        self.clicker_auto_target = tk.IntVar(value=0)
-        self.clicker_auto_done = tk.IntVar(value=0)
+        self.clicker_auto_target = self.clicker_shared_target
+        self.clicker_auto_done = self.clicker_shared_done
         
         auto_controls = ttk.Frame(auto_frame)
         auto_controls.pack(fill=tk.X)
@@ -1917,6 +1944,8 @@ class SpinHelperApp(tk.Tk):
                 if not self.spin_detector._wait_for_change(baseline, become_changed=True, timeout=1.8):
                     self._log(f"Slots: Spin #{spin_num} - no visual change")
                     continue
+                else:
+                    self._log("Slots: spinner NOT READY (spinning)", amber=True)
                 
                 # Then wait until READY (with grace)
                 if not self.spin_detector.wait_ready_with_grace(
@@ -2110,6 +2139,8 @@ class SpinHelperApp(tk.Tk):
                 if not self.spin_detector._wait_for_change(baseline, become_changed=True, timeout=1.8):
                     self._log(f"Automatic: Click #{next_idx} - no visual change")
                     continue
+                else:
+                    self._log("Automatic: spinner NOT READY (spinning)", amber=True)
                 
                 if self.spin_detector.wait_ready_with_grace(
                         baseline,
@@ -2524,8 +2555,12 @@ class SpinHelperApp(tk.Tk):
 
     # ---------- Logging ----------
 
-    def _log(self, msg, green=False, blue=False, red=False, orange=False, bright_blue=False):
-        if orange:
+    def _log(self, msg, green=False, blue=False, red=False, orange=False, bright_blue=False, yellow=False, amber=False):
+        if yellow:
+            color = self.tag_yellow
+        elif amber:
+            color = self.tag_amber
+        elif orange:
             color = self.tag_orange
         elif bright_blue:
             color = self.tag_bright_blue

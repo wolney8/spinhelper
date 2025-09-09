@@ -499,6 +499,59 @@ Hotfix: eliminate click/spin mismatches and restore progress
 
 ---
 
+## [1.18.8] — 2025-09-08
+Refine pre‑click readiness and logs (stability parity with 1.18.2)
+
+### Changed
+- Pre‑click overlay handling: before any progression click, check spinner state. If spinner reads READY, assume the previous spin completed and proceed (no click). Only if spinner is NOT_READY do we perform a small near‑spinner progression click (never the spin button, same monitor).
+- Logs: color‑coded readiness — READY (yellow), NOT READY/spinning (amber), completion (green). Retains strict NOT_READY→READY cycle requirement and short‑spin retry (< 2500 ms).
+
+### Notes
+- Counting remains synchronized: Actual Clicks increments alongside a confirmed spin after full cycle; no more click/spin mismatches.
+
+---
+
+## [1.18.9] — 2025-09-08
+Hotfix: speed up initial readiness and reduce false NOT_READY
+
+### Changed
+- Reduced initial pre‑click wait from 4.0s → 1.0s and post‑progression wait from 10.0s → 6.0s to speed up readiness checks.
+- Added relaxed READY tolerance (READY_SLACK) to treat minor wiggle animations as READY; auxiliary ROI activity now only forces NOT_READY when the main ROI is not near‑ready.
+
+### Notes
+- Counting/overlay logic from 1.18.8 retained (strict NOT_READY→READY, short‑spin retry, safe overlay progression near spinner).
+
+---
+
+## [1.18.10] — 2025-09-08
+Simplify readiness and speed up checks; UI scope narrowed
+
+### Added/Changed
+- Disabled Slots and Roulette tabs temporarily to focus on Clicker + Environment.
+- Clicker progress sharing: Counter and Automatic now share the same Target and Done values; users can switch modes mid‑session without losing progress.
+- Counter clicks counted only inside the captured spin button ROI (rectangular area); tighter than radius check.
+- Faster readiness: initial pre‑click wait reduced to 0.6s; post‑progression wait to 3.0s; overall timeout to 18s; poll interval ~33ms.
+- READY tolerance (READY_SLACK=4.5) reduces false NOT_READY when the spinner wiggles near baseline; auxiliary ROI only forces NOT_READY when main ROI isn’t near‑ready.
+- Logs simplified: emphasize READY (yellow), spinning (amber), completion (green).
+
+### Notes
+- Strict NOT_READY→READY confirmation and short‑spin retry (< 2500 ms) retained; post‑click waits remain passive (no grace clicks).
+
+---
+
+## [1.18.10] — 2025-09-08
+Simplify readiness and speed up checks
+
+### Changed
+- Reduced pre‑click initial wait to 0.6s and post‑progression wait to 3.0s.
+- Added READY_SLACK (4.5) to reduce false NOT_READY when the spinner wiggles near baseline; auxiliary ROI only forces NOT_READY when main ROI isn’t near‑ready.
+- Pre‑click logs simplified to READY (yellow) and TIMEOUT; reduced phase noise.
+
+### Notes
+- Strict cycle confirmation and short‑spin retry (< 2500 ms) retained; overlay avoidance maintained (no post‑click grace).
+
+---
+
 ### Milestone (v1.18.7)
 - Working baseline: Clicker → Automatic ran 75 consecutive clicks without issue (no focus loss), confirming core spin detection flow is stable again.
 - Scope: Only working feature validated is Clicker → Automatic; other modes not part of this milestone.
